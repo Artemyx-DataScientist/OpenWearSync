@@ -7,3 +7,10 @@ license.workspace = true
 [lib]
 
 [dependencies]
+openwearsync-protocol = { path = "../protocol" }
+openwearsync-security = { path = "../security" }
+openwearsync-transfer-core = { path = "../transfer-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+tempfile = "3.27.0"

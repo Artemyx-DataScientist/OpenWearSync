@@ -8,3 +8,8 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+openwearsync-protocol = { path = "../protocol" }
+openwearsync-security = { path = "../security" }
+openwearsync-transfer-core = { path = "../transfer-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
