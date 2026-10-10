@@ -157,4 +157,3 @@ gh api repos/Artemyx-DataScientist/OpenWearSync/git/trees/master?recursive=1
 ```
 
 Expected: visibility is `PUBLIC`, the default branch is `master`, and the remote tree contains `AGENTS.md`, the `.grace` paths, and no `C-*` change bundle.
-
