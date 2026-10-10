@@ -4,6 +4,10 @@
 // DEPENDS: openwearsync-protocol, openwearsync-security, openwearsync-transfer-core, openwearsync-receiver
 // LINKS: M-TRANSFER-CORE, M-WINDOWS-RECEIVER, V-M-WINDOWS-RECEIVER, DF-ENCRYPTED-CHUNK-UPLOAD, DF-DURABLE-CHECKPOINT
 // END_MODULE_CONTRACT
+//
+// START_MODULE_MAP
+//   SimulatedNetworkTransport - controllable test transport simulating intermittent Wi-Fi drops.
+// END_MODULE_MAP
 
 use openwearsync_protocol::{Manifest, ProtocolError, ProtocolResult, Request, Response};
 use openwearsync_receiver::{DurableFileStore, DurableTransferLedger, ReceiverService};
