@@ -232,7 +232,7 @@
         <Title>Complete GRACE target-validation and prepare controlled application</Title>
         <DependsOn>T-007</DependsOn>
         <AcceptanceCriteria>
-          <Criterion>Run the external GRACE validation lifecycle against the selected baseline and target: pre-edit grace lint --path . --assertions baseline; after edits grace lint --path . --assertions target and grace lint --path . --parallel-preflight; run grace status --path . --json.</Criterion>
+          <Criterion>After the durable edits, run the external GRACE target and parallel checks: grace lint --path . --assertions target, grace lint --path . --parallel-preflight, and grace status --path . --json. The pre-edit grace lint --path . --assertions baseline must already have passed before T-001 and any durable writes.</Criterion>
           <Criterion>Verify actual lint diagnostics, projection ownership, cross-links, active bundle statuses, scope and selected target assertions without executing future app-level tests; record warnings and failures honestly.</Criterion>
           <Criterion>Provide human review of all five context files, graph/verification indexes and routed documents. Do not mark this draft plan approved or mark the change applied without separate user approval and the GRACE execute/apply/archive lifecycle.</Criterion>
         </AcceptanceCriteria>
