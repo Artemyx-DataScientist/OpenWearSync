@@ -1,0 +1,245 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-ESTABLISH-OPENWEARSYNC-BASELINE>
+    <IntentSummary>Publish the approved OpenWearSync architecture as versioned GRACE 4 durable context, a nine-module/five-data-flow graph and matching module verification contracts. This change is a documentation-and-contract baseline only: no Rust/Kotlin source, test implementations, build tooling or binary releases are written by this plan. After approval, separate scoped implementation changes can construct the final application without throwaway intermediate versions.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>.grace/context/requirements.xml</Value>
+        <Value>.grace/context/technology.xml</Value>
+        <Value>.grace/context/principles.xml</Value>
+        <Value>.grace/context/deployment.xml</Value>
+        <Value>.grace/context/ux-guidelines.xml</Value>
+        <Value>.grace/graph/index.xml</Value>
+        <Value>.grace/verification/index.xml</Value>
+        <Value>GD-MAIN</Value>
+        <Value>VD-MAIN</Value>
+      </MustExist>
+      <MustNotExist>
+        <Value>M-WEAR-SHELL</Value>
+        <Value>M-ANDROID-PLATFORM</Value>
+        <Value>M-TRANSFER-CORE</Value>
+        <Value>M-DISCOVERY</Value>
+        <Value>M-PAIRING-SECURITY</Value>
+        <Value>M-WINDOWS-RECEIVER</Value>
+        <Value>M-TRANSFER-REGISTRY</Value>
+        <Value>M-DESKTOP-UI</Value>
+        <Value>M-ENERGY-POLICY</Value>
+        <Value>DF-RECORDING-MANIFEST</Value>
+        <Value>DF-DISCOVERY-AND-PAIRING</Value>
+        <Value>DF-ENCRYPTED-CHUNK-UPLOAD</Value>
+        <Value>DF-DURABLE-CHECKPOINT</Value>
+        <Value>DF-LIFECYCLE-CLEANUP</Value>
+      </MustNotExist>
+      <MustContain>
+        <File>.grace/changes/active/C-ESTABLISH-OPENWEARSYNC-BASELINE/spec.xml</File>
+        <Text>&lt;GraceChangeSpec graceVersion=&quot;4.0&quot; status=&quot;approved&quot;&gt;</Text>
+      </MustContain>
+      <MustContain>
+        <File>.grace/context/technology.xml</File>
+        <Text>Not established yet</Text>
+      </MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>M-WEAR-SHELL</Value>
+        <Value>M-ANDROID-PLATFORM</Value>
+        <Value>M-TRANSFER-CORE</Value>
+        <Value>M-DISCOVERY</Value>
+        <Value>M-PAIRING-SECURITY</Value>
+        <Value>M-WINDOWS-RECEIVER</Value>
+        <Value>M-TRANSFER-REGISTRY</Value>
+        <Value>M-DESKTOP-UI</Value>
+        <Value>M-ENERGY-POLICY</Value>
+        <Value>DF-RECORDING-MANIFEST</Value>
+        <Value>DF-DISCOVERY-AND-PAIRING</Value>
+        <Value>DF-ENCRYPTED-CHUNK-UPLOAD</Value>
+        <Value>DF-DURABLE-CHECKPOINT</Value>
+        <Value>DF-LIFECYCLE-CLEANUP</Value>
+      </MustExist>
+      <MustVerify>
+        <Module>M-WEAR-SHELL</Module>
+        <Module>M-ANDROID-PLATFORM</Module>
+        <Module>M-TRANSFER-CORE</Module>
+        <Module>M-DISCOVERY</Module>
+        <Module>M-PAIRING-SECURITY</Module>
+        <Module>M-WINDOWS-RECEIVER</Module>
+        <Module>M-TRANSFER-REGISTRY</Module>
+        <Module>M-DESKTOP-UI</Module>
+        <Module>M-ENERGY-POLICY</Module>
+      </MustVerify>
+      <MustOwn>
+        <Owner>GD-MAIN</Owner>
+        <Anchor>M-TRANSFER-CORE</Anchor>
+      </MustOwn>
+      <MustOwn>
+        <Owner>VD-MAIN</Owner>
+        <Anchor>V-M-ENERGY-POLICY</Anchor>
+      </MustOwn>
+      <MustContain>
+        <File>.grace/context/requirements.xml</File>
+        <Text>Samsung Voice Recorder</Text>
+      </MustContain>
+      <MustContain>
+        <File>.grace/context/technology.xml</File>
+        <Text>Rust</Text>
+      </MustContain>
+      <MustContain>
+        <File>.grace/context/principles.xml</File>
+        <Text>idle</Text>
+      </MustContain>
+      <MustContain>
+        <File>.grace/context/deployment.xml</File>
+        <Text>Windows</Text>
+      </MustContain>
+      <MustContain>
+        <File>.grace/context/ux-guidelines.xml</File>
+        <Text>Wear OS</Text>
+      </MustContain>
+      <MustNotContain>
+        <File>.grace/context/technology.xml</File>
+        <Text>Not established yet</Text>
+      </MustNotContain>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphDocuments>
+        <GD-MAIN />
+      </GraphDocuments>
+      <VerificationDocuments>
+        <VD-MAIN />
+      </VerificationDocuments>
+      <GraphAnchors>
+        <M-WEAR-SHELL />
+        <M-ANDROID-PLATFORM />
+        <M-TRANSFER-CORE />
+        <M-DISCOVERY />
+        <M-PAIRING-SECURITY />
+        <M-WINDOWS-RECEIVER />
+        <M-TRANSFER-REGISTRY />
+        <M-DESKTOP-UI />
+        <M-ENERGY-POLICY />
+        <DF-RECORDING-MANIFEST />
+        <DF-DISCOVERY-AND-PAIRING />
+        <DF-ENCRYPTED-CHUNK-UPLOAD />
+        <DF-DURABLE-CHECKPOINT />
+        <DF-LIFECYCLE-CLEANUP />
+      </GraphAnchors>
+      <VerificationAnchors>
+        <V-M-WEAR-SHELL />
+        <V-M-ANDROID-PLATFORM />
+        <V-M-TRANSFER-CORE />
+        <V-M-DISCOVERY />
+        <V-M-PAIRING-SECURITY />
+        <V-M-WINDOWS-RECEIVER />
+        <V-M-TRANSFER-REGISTRY />
+        <V-M-DESKTOP-UI />
+        <V-M-ENERGY-POLICY />
+      </VerificationAnchors>
+      <ContextArtifact>requirements.xml</ContextArtifact>
+      <ContextArtifact>technology.xml</ContextArtifact>
+      <ContextArtifact>principles.xml</ContextArtifact>
+      <ContextArtifact>deployment.xml</ContextArtifact>
+      <ContextArtifact>ux-guidelines.xml</ContextArtifact>
+    </DurableScope>
+    <ObservedWriteScope>
+      <None />
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Formalize product requirements and recording transfer invariants</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Write .grace/context/requirements.xml as normative one-way Samsung Voice Recorder transfer requirements with users, supported topology, lossless resume, no deletion, security and explicit acceptance outcomes.</Criterion>
+          <Criterion>Distinguish exactly-once durable file outcome from at-least-once delivery; define a stable-recording readiness rule and non-root app access verification gate.</Criterion>
+          <Criterion>Clearly separate user-confirmed facts from unverified client-isolation, MediaStore/SAF access, and overnight battery assumptions. Preserve unknowns as test gates rather than claims.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -Command &quot;[xml](Get-Content -Raw -LiteralPath '.grace/context/requirements.xml') | Out-Null&quot;</Command>
+        </Verification>
+      </T-001>
+      <T-002>
+        <Title>Fix target technology and portable interface boundaries</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Update .grace/context/technology.xml to define shared Rust transfer/protocol/security core on Wear OS and Windows, Android NDK/JNI bridge, Kotlin Compose Wear UI, Android network/file/lifecycle adapter, Windows Rust Tokio/Axum receiver and Kotlin Compose Desktop UI.</Criterion>
+          <Criterion>Specify ownership and neutral protocol/FFI versioning, per-platform transport binding and keystore boundaries; do not invent a permanent native watch background daemon.</Criterion>
+          <Criterion>Define design-stage toolchain and future test categories while leaving exact unmeasured version/device support and cryptographic crate selections explicitly pending approval.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -Command &quot;[xml](Get-Content -Raw -LiteralPath '.grace/context/technology.xml') | Out-Null&quot;</Command>
+        </Verification>
+      </T-002>
+      <T-003>
+        <Title>Specify project engineering and battery/security principles</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Update .grace/context/principles.xml with contract-first GRACE governance, one target architecture without throwaway ports, Kotlin-owned Android scheduling, Rust as cancellable component and reviewed authentication.</Criterion>
+          <Criterion>Make idle, bounded discovery, no indefinite retry, release Wi-Fi requests and wake locks, protected original recordings and traceable failure paths explicit engineering principles.</Criterion>
+          <Criterion>Retain evidence-based safety and energy criteria: no claim that hotspot unicast, multicast, recording access, idle-drain target, or permissions have already been validated.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -Command &quot;[xml](Get-Content -Raw -LiteralPath '.grace/context/principles.xml') | Out-Null&quot;</Command>
+        </Verification>
+      </T-003>
+      <T-004>
+        <Title>Define release topology and Wear/Windows user-experience contracts</Title>
+        <DependsOn>T-001, T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Update .grace/context/deployment.xml with Wear OS APK/JNI and Windows Rust receiver/Compose Desktop packaging, local LAN and S25 Ultra hotspot topology, private firewall scope, pairing/revocation and install/update/release verification gates.</Criterion>
+          <Criterion>Update .grace/context/ux-guidelines.xml with circular Wear OS screens, one-action manual upload, progress/pause/cancel, pairing/connection/energy errors, accessible touch targets and Windows receiver status/history/settings.</Criterion>
+          <Criterion>Explicitly specify OS-cooperative opt-in automatic work and manual/saved endpoint fallback; address client isolation as a network blocker that a manually entered IP cannot bypass.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -Command &quot;[xml](Get-Content -Raw -LiteralPath '.grace/context/deployment.xml') | Out-Null; [xml](Get-Content -Raw -LiteralPath '.grace/context/ux-guidelines.xml') | Out-Null&quot;</Command>
+        </Verification>
+      </T-004>
+      <T-005>
+        <Title>Construct nine-module ownership graph and five explicit data flows</Title>
+        <DependsOn>T-001, T-002, T-003</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Populate GD-MAIN in .grace/graph/main.xml with the nine M-* definitions in the approved spec and the five DF-* definitions: recording manifest, discovery/pairing, encrypted upload, durable checkpoints and lifecycle cleanup.</Criterion>
+          <Criterion>State for every module responsibility, dependencies, platform owner, exposed interfaces, invariants, linked modules, failure modes and cancellation or persistence behavior; avoid duplicating ownership across Kotlin and Rust.</Criterion>
+          <Criterion>Update .grace/graph/index.xml GD-MAIN Owns routing to include every and only those graph anchors; keep all semantic IDs as attribute-free XML tags.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -Command &quot;[xml](Get-Content -Raw -LiteralPath '.grace/graph/index.xml') | Out-Null; [xml](Get-Content -Raw -LiteralPath '.grace/graph/main.xml') | Out-Null&quot;</Command>
+        </Verification>
+      </T-005>
+      <T-006>
+        <Title>Create matching verification contracts and evidence gates</Title>
+        <DependsOn>T-004, T-005</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Populate VD-MAIN with one V-M-* verification entry for each of the nine graph modules and route all entries via .grace/verification/index.xml.</Criterion>
+          <Criterion>Define observable deterministic integration/unit and security test contracts: non-privileged recording reads, Wi-Fi binding, hotspot client reachability, mDNS fallback, pairing, TLS identity pinning, chunk idempotence/resume/integrity, receiver crash/disk full, in-progress recording and exact-once durable file outcome.</Criterion>
+          <Criterion>Include real-hardware pending gates for overnight matched battery and temperature trials with thresholds, explicit setup and raw evidence requirements; do not label unexecuted gates passed. Each entry must have meaningful Scenario and TraceAssertion/Marker criteria compatible with GRACE 4.</Criterion>
+          <Criterion>Separate current documentary evidence from future executable product tests: don't reference fictitious build scripts or absent test files as already-running commands.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -Command &quot;[xml](Get-Content -Raw -LiteralPath '.grace/verification/index.xml') | Out-Null; [xml](Get-Content -Raw -LiteralPath '.grace/verification/main.xml') | Out-Null&quot;</Command>
+        </Verification>
+      </T-006>
+      <T-007>
+        <Title>Cross-check approved scope, ownership and open hardware uncertainties</Title>
+        <DependsOn>T-003, T-004, T-005, T-006</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Cross-check GRACE requirements, graph, verification, architecture proposal and approved spec for one-to-one module/verification coverage, matching interface assumptions, ownership and requirements-to-gate traceability.</Criterion>
+          <Criterion>Do not convert unknown real-device facts into implementation guarantees; unresolved hotspot isolation, file access, network binding and thermal behavior must remain explicit release blockers or measurable test gates.</Criterion>
+          <Criterion>Reject changes outside the declared durable scope and reject any source code, project build manifests, undocumented new modules or unrequested features in this baseline change.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>git diff --check</Command>
+        </Verification>
+      </T-007>
+      <T-008>
+        <Title>Complete GRACE target-validation and prepare controlled application</Title>
+        <DependsOn>T-007</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>After the durable edits, run the external GRACE target and parallel checks: grace lint --path . --assertions target, grace lint --path . --parallel-preflight, and grace status --path . --json. The pre-edit grace lint --path . --assertions baseline must already have passed before T-001 and any durable writes.</Criterion>
+          <Criterion>Verify actual lint diagnostics, projection ownership, cross-links, active bundle statuses, scope and selected target assertions without executing future app-level tests; record warnings and failures honestly.</Criterion>
+          <Criterion>Provide human review of all five context files, graph/verification indexes and routed documents. Do not mark this draft plan approved or mark the change applied without separate user approval and the GRACE execute/apply/archive lifecycle.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>git diff --check</Command>
+        </Verification>
+      </T-008>
+    </ImplementationPlan>
+  </C-ESTABLISH-OPENWEARSYNC-BASELINE>
+</GraceChangePlan>
