@@ -1,3 +1,106 @@
 <GraceGraphDocument graceVersion="4.0">
-  <GD-MAIN></GD-MAIN>
+  <GD-MAIN>
+    <M-WEAR-SHELL>
+      <Name>Wear Shell</Name>
+      <Purpose>Wear OS circular Compose UI, recording list, progress display, and manual transfer controls.</Purpose>
+      <Files>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/Bootstrap.kt</File>
+      </Files>
+    </M-WEAR-SHELL>
+
+    <M-ANDROID-PLATFORM>
+      <Name>Android Platform Adapters</Name>
+      <Purpose>MediaStore recording discovery, non-privileged content access, and stability checks.</Purpose>
+      <Files>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/MediaStoreRecordingProvider.kt</File>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/RecordingReadiness.kt</File>
+      </Files>
+    </M-ANDROID-PLATFORM>
+
+    <M-TRANSFER-CORE>
+      <Name>Portable Transfer Engine</Name>
+      <Purpose>Shared Rust streaming sender, incremental SHA-256 chunker, reconciliation state machine, and cancellation.</Purpose>
+      <Files>
+        <File>crates/transfer-core/src/lib.rs</File>
+        <File>crates/protocol/src/lib.rs</File>
+      </Files>
+    </M-TRANSFER-CORE>
+
+    <M-DISCOVERY>
+      <Name>Network Discovery and Binding</Name>
+      <Purpose>Wear OS Wi-Fi network acquisition, process network socket binding, and bounded NSD/mDNS discovery.</Purpose>
+      <Files>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/WifiNetwork.kt</File>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/AndroidWifiNetworkRequester.kt</File>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/PeerDiscovery.kt</File>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/AndroidNsdDiscoveryDriver.kt</File>
+      </Files>
+    </M-DISCOVERY>
+
+    <M-PAIRING-SECURITY>
+      <Name>Pairing and Transport Security</Name>
+      <Purpose>One-time PIN pairing, HMAC authentication tokens, rate-limited guessing defense, replay filtering, and peer registry.</Purpose>
+      <Files>
+        <File>crates/security/src/lib.rs</File>
+      </Files>
+    </M-PAIRING-SECURITY>
+
+    <M-WINDOWS-RECEIVER>
+      <Name>Windows Receiver Service</Name>
+      <Purpose>Windows local HTTPS transfer service, staging file store, and crash-safe chunk journaling.</Purpose>
+      <Files>
+        <File>crates/receiver/src/lib.rs</File>
+      </Files>
+    </M-WINDOWS-RECEIVER>
+
+    <M-TRANSFER-REGISTRY>
+      <Name>Transfer Registry</Name>
+      <Purpose>Durable transfer metadata ledger, manifest tracking, received chunk intervals, and commit status.</Purpose>
+      <Files>
+        <File>crates/receiver/src/lib.rs</File>
+      </Files>
+    </M-TRANSFER-REGISTRY>
+
+    <M-DESKTOP-UI>
+      <Name>Desktop UI Shell</Name>
+      <Purpose>Windows Compose Desktop UI presentation, pairing management, destination selection, and history viewer.</Purpose>
+      <Files>
+        <File>desktop/app/src/main/kotlin/com/openwearsync/desktop/Bootstrap.kt</File>
+      </Files>
+    </M-DESKTOP-UI>
+
+    <M-ENERGY-POLICY>
+      <Name>Energy and Lifecycle Policy</Name>
+      <Purpose>Quiescent idle state enforcement, bounded session timeouts, immediate resource release on completion or error.</Purpose>
+      <Files>
+        <File>crates/transfer-core/src/lib.rs</File>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/WifiNetwork.kt</File>
+      </Files>
+    </M-ENERGY-POLICY>
+
+    <DF-RECORDING-MANIFEST>
+      <Name>Recording Manifest Flow</Name>
+      <Purpose>Discovery of completed recordings and serialization of size, timestamp, and SHA-256 manifest.</Purpose>
+    </DF-RECORDING-MANIFEST>
+
+    <DF-DISCOVERY-AND-PAIRING>
+      <Name>Discovery and Pairing Flow</Name>
+      <Purpose>NSD/mDNS discovery of receiver endpoint followed by one-time code pairing and mutual secret establishment.</Purpose>
+    </DF-DISCOVERY-AND-PAIRING>
+
+    <DF-ENCRYPTED-CHUNK-UPLOAD>
+      <Name>Encrypted Chunk Upload Flow</Name>
+      <Purpose>Streaming upload of bounded audio chunks over authenticated Wi-Fi transport.</Purpose>
+    </DF-ENCRYPTED-CHUNK-UPLOAD>
+
+    <DF-DURABLE-CHECKPOINT>
+      <Name>Durable Checkpoint Flow</Name>
+      <Purpose>Journaling of chunk acknowledgements and atomic finalization of received recording.</Purpose>
+    </DF-DURABLE-CHECKPOINT>
+
+    <DF-LIFECYCLE-CLEANUP>
+      <Name>Lifecycle Cleanup Flow</Name>
+      <Purpose>Immediate release of Wi-Fi requests, sockets, wakelocks, and cancellation handles on completion or error.</Purpose>
+    </DF-LIFECYCLE-CLEANUP>
+  </GD-MAIN>
 </GraceGraphDocument>

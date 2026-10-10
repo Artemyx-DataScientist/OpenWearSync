@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="cancelled">
   <C-ESTABLISH-OPENWEARSYNC-BASELINE>
     <IntentSummary>Publish the approved OpenWearSync architecture as versioned GRACE 4 durable context, a nine-module/five-data-flow graph and matching module verification contracts. This change is a documentation-and-contract baseline only: no Rust/Kotlin source, test implementations, build tooling or binary releases are written by this plan. After approval, separate scoped implementation changes can construct the final application without throwaway intermediate versions.</IntentSummary>
     <BaselineAssertions>

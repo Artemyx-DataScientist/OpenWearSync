@@ -1,0 +1,398 @@
+<GraceChangePlan graceVersion="4.0" status="approved">
+  <C-IMPLEMENT-OPENWEARSYNC-END-TO-END>
+    <IntentSummary>Implement the entire runnable OpenWearSync watch and Windows product defined by the current approved GRACE context: shared Rust protocol/transfer/security core, Android JNI/Compose Wear integration, secure local Wi-Fi upload, durable Windows Rust receiver/SQLite, Kotlin Compose Desktop UI, realistic energy management, automated verification, CI and installable artifacts. The earlier baseline bundle is cancelled; validate current context before source writes. Only approved source and durable GRACE scopes may be written; preserve local work.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>.grace/context/requirements.xml</Value>
+        <Value>.grace/context/technology.xml</Value>
+        <Value>.grace/graph/index.xml</Value>
+        <Value>.grace/verification/index.xml</Value>
+      </MustExist>
+      <MustContain>
+        <File>.grace/context/technology.xml</File>
+        <Text>Rust</Text>
+      </MustContain>
+      <MustContain>
+        <File>.grace/changes/active/C-IMPLEMENT-OPENWEARSYNC-END-TO-END/spec.xml</File>
+        <Text>status="approved"</Text>
+      </MustContain>
+      <MustNotExist>
+        <Value>.grace/changes/active/C-ESTABLISH-OPENWEARSYNC-BASELINE</Value>
+        <Value>crates/protocol/Cargo.toml</Value>
+        <Value>wear/app/build.gradle.kts</Value>
+        <Value>desktop/app/build.gradle.kts</Value>
+        <Value>scripts/gates/rust-core.ps1</Value>
+      </MustNotExist>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>Cargo.toml</Value>
+        <Value>Cargo.lock</Value>
+        <Value>crates/protocol/Cargo.toml</Value>
+        <Value>crates/transfer-core/Cargo.toml</Value>
+        <Value>crates/security/Cargo.toml</Value>
+        <Value>crates/receiver/Cargo.toml</Value>
+        <Value>crates/android-ffi/Cargo.toml</Value>
+        <Value>settings.gradle.kts</Value>
+        <Value>wear/app/build.gradle.kts</Value>
+        <Value>desktop/app/build.gradle.kts</Value>
+        <Value>scripts/gates/rust-core.ps1</Value>
+        <Value>scripts/gates/android-build.ps1</Value>
+        <Value>scripts/gates/desktop-build.ps1</Value>
+        <Value>scripts/gates/protocol-contract.ps1</Value>
+        <Value>scripts/gates/receiver-integration.ps1</Value>
+        <Value>.github/workflows/build-and-test.yml</Value>
+        <Value>docs/implementation/device-acceptance.md</Value>
+      </MustExist>
+      <MustVerify>
+        <Module>M-WEAR-SHELL</Module>
+        <Module>M-ANDROID-PLATFORM</Module>
+        <Module>M-TRANSFER-CORE</Module>
+        <Module>M-DISCOVERY</Module>
+        <Module>M-PAIRING-SECURITY</Module>
+        <Module>M-WINDOWS-RECEIVER</Module>
+        <Module>M-TRANSFER-REGISTRY</Module>
+        <Module>M-DESKTOP-UI</Module>
+        <Module>M-ENERGY-POLICY</Module>
+      </MustVerify>
+      <MustOwn>
+        <Owner>GD-MAIN</Owner>
+        <Anchor>M-TRANSFER-CORE</Anchor>
+      </MustOwn>
+      <MustOwn>
+        <Owner>GD-MAIN</Owner>
+        <Anchor>M-WEAR-SHELL</Anchor>
+      </MustOwn>
+      <MustOwn>
+        <Owner>GD-MAIN</Owner>
+        <Anchor>M-WINDOWS-RECEIVER</Anchor>
+      </MustOwn>
+      <MustOwn>
+        <Owner>GD-MAIN</Owner>
+        <Anchor>M-ENERGY-POLICY</Anchor>
+      </MustOwn>
+      <MustPassCommand>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/rust-core.ps1</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/protocol-contract.ps1</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/receiver-integration.ps1</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphDocuments>
+        <GD-MAIN />
+      </GraphDocuments>
+      <VerificationDocuments>
+        <VD-MAIN />
+      </VerificationDocuments>
+      <GraphAnchors>
+        <M-WEAR-SHELL />
+        <M-ANDROID-PLATFORM />
+        <M-TRANSFER-CORE />
+        <M-DISCOVERY />
+        <M-PAIRING-SECURITY />
+        <M-WINDOWS-RECEIVER />
+        <M-TRANSFER-REGISTRY />
+        <M-DESKTOP-UI />
+        <M-ENERGY-POLICY />
+        <DF-RECORDING-MANIFEST />
+        <DF-DISCOVERY-AND-PAIRING />
+        <DF-ENCRYPTED-CHUNK-UPLOAD />
+        <DF-DURABLE-CHECKPOINT />
+        <DF-LIFECYCLE-CLEANUP />
+      </GraphAnchors>
+      <VerificationAnchors>
+        <V-M-WEAR-SHELL />
+        <V-M-ANDROID-PLATFORM />
+        <V-M-TRANSFER-CORE />
+        <V-M-DISCOVERY />
+        <V-M-PAIRING-SECURITY />
+        <V-M-WINDOWS-RECEIVER />
+        <V-M-TRANSFER-REGISTRY />
+        <V-M-DESKTOP-UI />
+        <V-M-ENERGY-POLICY />
+      </VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.toml</File>
+      <File>Cargo.lock</File>
+      <File>rust-toolchain.toml</File>
+      <File>.gitignore</File>
+      <File>settings.gradle.kts</File>
+      <File>build.gradle.kts</File>
+      <File>gradle.properties</File>
+      <File>gradlew</File>
+      <File>gradlew.bat</File>
+      <File>README.md</File>
+      <File>LICENSE</File>
+      <Glob>crates/**</Glob>
+      <Glob>wear/**</Glob>
+      <Glob>desktop/**</Glob>
+      <Glob>gradle/**</Glob>
+      <Glob>tests/**</Glob>
+      <Glob>scripts/**</Glob>
+      <Glob>.github/**</Glob>
+      <Glob>docs/implementation/**</Glob>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Bootstrap final Rust and Kotlin multi-platform build without prototypes</Title>
+        <DependsOn />
+        <AcceptanceCriteria>
+          <Criterion>Create the Cargo workspace, Android JNI crate, Wear app, Kotlin Desktop app, Gradle wrapper/version catalog, shared build configuration, initial scripts/gates and Windows CI skeleton. Pin compatible toolchain versions in committed files.</Criterion>
+          <Criterion>Organize one final target repository; no disposable alternate clients or receivers. Define the project root tasks to build both shipping artifacts.</Criterion>
+          <Criterion>Ensure the baseline project can resolve dependencies and metadata on Windows with Android SDK and Rust toolchains installed.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo metadata --format-version 1 --no-deps</Command>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/project-structure.ps1</Command>
+        </Verification>
+      </T-001>
+      <T-002>
+        <Title>Implement Rust wire protocol and versioned cross-platform contracts</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement crates/protocol with typed manifest, capabilities, request/response, durable chunk descriptors, structured errors, protocol negotiation and strict size/range limits.</Criterion>
+          <Criterion>Freeze and test deterministic wire serialization and compatibility vectors; use bounded frames and reject malformed/untrusted metadata.</Criterion>
+          <Criterion>Document endpoint methods for status, transfer create/reconcile, idempotent chunk upload and commit.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test -p openwearsync-protocol --locked</Command>
+        </Verification>
+      </T-002>
+      <T-003>
+        <Title>Implement shared Rust transfer engine, source integrity and resume state machine</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement cancellable streaming Rust sender/common core; bounded buffer; file version/manifest checks; chunk digests; local durable session identity; deterministic reconnect and acknowledgements.</Criterion>
+          <Criterion>Handle retries, duplicate/overlapping/out-of-order chunks, offset reconciliation, crash and cancellation without reading entire media files into memory.</Criterion>
+          <Criterion>Implement end-to-end integrity conditions that distinguish server-only hashes and source-verified content; enforce no source-file deletion.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test -p openwearsync-transfer-core --locked</Command>
+        </Verification>
+      </T-003>
+      <T-004>
+        <Title>Implement audited cryptographic pairing and authenticated secure transport</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement user-authorized one-time code pairing with reviewed PAKE or equivalent offline-guessing resistance, endpoint key pinning, TLS validation, pairing revocation and secret storage interfaces.</Criterion>
+          <Criterion>Enforce a bounded online guessing rate, restricted allowed peer list, replay defense, zero insecure TLS bypass and no private keys in repository.</Criterion>
+          <Criterion>Prove unpaired or revoked clients cannot initiate transfers through attack-oriented host tests.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test -p openwearsync-security --locked</Command>
+        </Verification>
+      </T-004>
+      <T-005>
+        <Title>Implement durable Windows SQLite transfer ledger and crash-safe file store</Title>
+        <DependsOn>T-002, T-003</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement receiver file staging, consistent chunk journaling, durable fsync/checkpoint/ack ordering, read/write resource bounds and safe final filenames.</Criterion>
+          <Criterion>Use idempotent transfer identity and atomic final commit or documented safe fallback; reject duplicate completion, path traversal, disk full and stale source manifest.</Criterion>
+          <Criterion>Ensure a crash/reboot never yields acknowledged but lost data or a partial file falsely marked complete.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test -p openwearsync-receiver --locked durable</Command>
+        </Verification>
+      </T-005>
+      <T-006>
+        <Title>Implement Windows Rust HTTPS receiver service and transfer protocol API</Title>
+        <DependsOn>T-004, T-005</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement independently runnable, authenticated local LAN Rust HTTP(S) receiver with discovery advertisement, request limits and structured telemetry.</Criterion>
+          <Criterion>Expose status, session negotiation, ledger reconciliation, chunk receipt, complete and abort endpoints; handle concurrent sessions safely under explicit caps.</Criterion>
+          <Criterion>Bind only intended local interface/network policy and document Windows Firewall private-network configuration.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test -p openwearsync-receiver --locked service</Command>
+        </Verification>
+      </T-006>
+      <T-007>
+        <Title>Implement non-privileged Samsung Voice Recorder content discovery and readiness</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement Kotlin Android source adapter using supported MediaStore/content URI permissions and/or explicit user-granted provider access; support long large-file streaming descriptors and metadata.</Criterion>
+          <Criterion>Exclude changing/in-progress recordings, distinguish completed from unknown stability, handle revoked permissions and report no-access blocks instead of assuming ADB privileges.</Criterion>
+          <Criterion>Ship deterministic Kotlin tests with fake providers and explicit real-watch acceptance steps.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command>
+        </Verification>
+      </T-007>
+      <T-008>
+        <Title>Implement Wear OS Wi-Fi network acquisition, peer discovery and bounded selection</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement Kotlin ConnectivityManager Wi-Fi network acquisition and explicit binding for transfer sockets/DNS; verify native Rust transport cannot silently route over Bluetooth.</Criterion>
+          <Criterion>Implement time-bounded discovery via NSD/mDNS and fallback to saved/manual receiver address; ensure client isolation errors are diagnosed and not bypassed by manual IP.</Criterion>
+          <Criterion>Close callbacks/network requests promptly in normal and exceptional paths; allow Wi-Fi hotspot and normal LAN networks.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command>
+        </Verification>
+      </T-008>
+      <T-009>
+        <Title>Implement Android ARM64 Rust JNI bridge and safe lifecycle/cancellation interface</Title>
+        <DependsOn>T-003, T-004, T-008</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Build Android NDK Rust cdylib for supported device ABI and package it into Wear APK; define stable handle-based JNI API for start, status, pause, cancel and cleanup.</Criterion>
+          <Criterion>Use OS-permitted file descriptors/content streams without private directory assumptions; enforce safe threading, JNI error mapping, cancellation and resource cleanup.</Criterion>
+          <Criterion>Implement mock-host tests for JNI boundary and native ABI packaging validation.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+        </Verification>
+      </T-009>
+      <T-010>
+        <Title>Implement end-to-end Wear transfer orchestration and durable client resume</Title>
+        <DependsOn>T-006, T-007, T-008, T-009</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Join file readiness, explicit Wi-Fi, Rust transfer core, secure pairing identity and receiver checkpoint API into one cancellable session owner.</Criterion>
+          <Criterion>Support manual Send New, per-file idempotency, error recovery, network reconnect, source changes, rejection and confirmation of final receiver commit.</Criterion>
+          <Criterion>Persist only bounded minimal client state; no forever background worker or unbounded retries.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command>
+        </Verification>
+      </T-010>
+      <T-011>
+        <Title>Implement paired-device discovery and enrollment UX endpoints</Title>
+        <DependsOn>T-004, T-006, T-008</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Connect receiver pairing enrollment/revocation and bounded mDNS advertisement to Android scan/fallback controls.</Criterion>
+          <Criterion>Use accessible watch entry of a one-time code and trusted Windows confirmation; show fingerprint/identity mismatch and handle wrong/expired codes without weakening transport.</Criterion>
+          <Criterion>Verify a stranger on hotspot cannot trigger unsolicited upload, and changing peer IP does not change pinning.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/protocol-contract.ps1</Command>
+        </Verification>
+      </T-011>
+      <T-012>
+        <Title>Implement round-screen Wear OS Compose UI and user controls</Title>
+        <DependsOn>T-010, T-011</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Deliver Wear OS Material 3 home, recording eligibility, pairing, transfer progress, pause/cancel, failure and compact settings with circular-safe layout and accessibility.</Criterion>
+          <Criterion>Keep foreground user-invoked transfer visible and correctly managed on supported Wear OS versions; do not promise immediate background work.</Criterion>
+          <Criterion>Exercise navigation, configuration change, process stop/resume and permission denial tests.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+        </Verification>
+      </T-012>
+      <T-013>
+        <Title>Implement energy policy, opt-in scheduling and lifecycle guarantees</Title>
+        <DependsOn>T-010, T-012</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Encode IDLE, ELIGIBILITY, WIFI_ACQUIRE, DISCOVER, AUTHENTICATE, STREAM, VERIFY, CLEANUP states with enforced discovery and attempt timeouts.</Criterion>
+          <Criterion>No active idle socket, Wi-Fi Network request, wakelock, endless retry or continuous polling; scheduled work uses OS cooperative constraints with explicit user opt-in and battery/thermal stop policy.</Criterion>
+          <Criterion>Test every cancellation/timeout/success/error exit using fake lifecycle/network/thermal managers; expose trace markers for real device measurements.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command>
+        </Verification>
+      </T-013>
+      <T-014>
+        <Title>Implement Kotlin Compose Desktop UI and Windows service integration</Title>
+        <DependsOn>T-005, T-006, T-011</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Implement receiver status, paired watches, enroll/revoke, destination folder, history, transfer progress, storage and firewall guidance and limited diagnostics export.</Criterion>
+          <Criterion>Keep Windows Rust listener alive as independently managed service when the UI closes if the user enables that mode, and support clean service shutdown.</Criterion>
+          <Criterion>Ensure credentials and recordings remain local and the UI never pretends failed writes were successful.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command>
+        </Verification>
+      </T-014>
+      <T-015>
+        <Title>Implement Rust/Kotlin cross-language protocol and security compatibility tests</Title>
+        <DependsOn>T-002, T-004, T-009, T-010, T-011</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Provide deterministic protocol vectors shared between Rust and Kotlin/JNI, handshakes and invalid input tests, stable version negotiation and mispaired/unknown peer rejection.</Criterion>
+          <Criterion>Verify binary chunks and large simulated streams do not require unbounded JVM/native heap memory.</Criterion>
+          <Criterion>Supply scripts/gates/protocol-contract.ps1 as a leaf acceptance command with real failures propagated.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/protocol-contract.ps1</Command>
+        </Verification>
+      </T-015>
+      <T-016>
+        <Title>Implement Windows crash, hostile-input and disk-pressure integration tests</Title>
+        <DependsOn>T-005, T-006</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Test interrupted and repeated upload, corrupted hash, receiver crash/restart, journal durability, disk full, path traversal, forged ID, attempt flood limits and idempotent finalize.</Criterion>
+          <Criterion>Test no final file is published before integrity check and no duplicate completed result after replay.</Criterion>
+          <Criterion>Supply scripts/gates/receiver-integration.ps1 with bounded deterministic host tests.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/receiver-integration.ps1</Command>
+        </Verification>
+      </T-016>
+      <T-017>
+        <Title>Run simulated complete end-to-end transfer under connection failures</Title>
+        <DependsOn>T-010, T-013, T-014, T-015, T-016</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Orchestrate the actual Rust receiver and Kotlin/Android-adapter-equivalent sender path with fixture audio including greater-than-memory file sizes, checkpoint reconciliation, cancellation and reconnect.</Criterion>
+          <Criterion>Assert transmitted file bytes, full digest evidence, receiver durable final result, duplicate suppression and cleanup of every network/session resource.</Criterion>
+          <Criterion>Capture reproducible logs and report pending true-watch transport/recording access separately.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/protocol-contract.ps1</Command>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/receiver-integration.ps1</Command>
+        </Verification>
+      </T-017>
+      <T-018>
+        <Title>Package installable Wear APK and Windows app, and configure CI gates</Title>
+        <DependsOn>T-012, T-013, T-014, T-017</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Produce Android APK with bundled ABI-appropriate Rust library, Windows receiver executable and distributable Compose Desktop app, with reproducible build instructions.</Criterion>
+          <Criterion>Configure Windows/Android CI jobs that execute the Rust, contract, Kotlin and integration leaf gates, and save build artifacts without storing signing secrets.</Criterion>
+          <Criterion>No claim of production code signing without credentials; debug APK and testable Windows distribution are mandatory evidence.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command>
+        </Verification>
+      </T-018>
+      <T-019>
+        <Title>Provide real-watch and hotspot hardware acceptance harness with honest status</Title>
+        <DependsOn>T-013, T-017, T-018</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Write repeatable field tests for unprivileged Samsung recording reads, both devices on S25 Ultra hotspot, station-to-station TCP, multicast fallback, Wi-Fi-only routing, large live upload and interrupted resume.</Criterion>
+          <Criterion>Provide battery/thermal baseline methodology with matched control sessions over eight hours and threshold evaluation; record actual traces and unknown firmware/OS versions.</Criterion>
+          <Criterion>Automate available ADB/logcat/perf capture without requiring root; if hardware missing or hotspot isolation blocks traffic, mark release gate PENDING/BLOCKED and never convert it to PASS.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/device-preflight.ps1</Command>
+        </Verification>
+      </T-019>
+      <T-020>
+        <Title>Update GRACE durable module contracts and verification projection from implemented source</Title>
+        <DependsOn>T-013, T-014, T-015, T-016, T-018</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Update all nine M-* and five DF-* definitions in GD-MAIN with concrete code paths, ownership, dependencies, contracts and file-local START_MODULE_CONTRACT / START_CONTRACT / LINKS references.</Criterion>
+          <Criterion>Update corresponding V-M-* entries with real runnable gate tasks, test file paths, trace assertions and distinct hardware acceptance tiers; keep index routing valid.</Criterion>
+          <Criterion>All durable truth remains consistent with already approved user requirements, with no expansion to unsupported features.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/project-structure.ps1</Command>
+        </Verification>
+      </T-020>
+      <T-021>
+        <Title>Complete code review and target evidence without prematurely applying GRACE</Title>
+        <DependsOn>T-018, T-019, T-020</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Review security, battery, JNI safety, no unintended background activity, failure behavior and local repo drift. Run all five leaf target gate commands on a capable host and retain logs.</Criterion>
+          <Criterion>Run outer GRACE selected target and final assertions after project tests, reconcile scope/projections, and report skipped/blocked real-device tests honestly.</Criterion>
+          <Criterion>Do not silently mark spec/plan applied or archive change without separate user apply confirmation, and do not treat CI artifact creation as proof of real watch operation.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/rust-core.ps1</Command>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+          <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command>
+        </Verification>
+      </T-021>
+    </ImplementationPlan>
+  </C-IMPLEMENT-OPENWEARSYNC-END-TO-END>
+</GraceChangePlan>

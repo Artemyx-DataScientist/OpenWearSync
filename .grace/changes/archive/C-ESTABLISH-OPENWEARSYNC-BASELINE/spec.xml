@@ -1,4 +1,4 @@
-<GraceChangeSpec graceVersion="4.0" status="approved">
+<GraceChangeSpec graceVersion="4.0" status="cancelled">
   <C-ESTABLISH-OPENWEARSYNC-BASELINE>
     <Summary>Establish the approved, verifiable product and technical baseline for OpenWearSync, a Wear OS to Windows voice-recording transfer system over local Wi-Fi.</Summary>
     <Problem>Syncthing-Fork sustained background network activity on Galaxy Watch and caused unacceptable battery drain even when the Windows computer was unavailable. OpenWearSync currently has a GRACE 4 bootstrap but no product-specific contracts, modules, or verification projection.</Problem>

@@ -1,0 +1,8 @@
+# Local build outputs and caches
+.gradle/
+build/
+**/build/
+target/
+local.properties
+*.iml
+.idea/

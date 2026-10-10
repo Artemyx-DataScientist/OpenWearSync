@@ -1,5 +1,45 @@
 <GraceDeployment graceVersion="4.0">
   <Applicability>applicable</Applicability>
-  <Target>Not established yet</Target>
-  <Notes>Deployment target and release gates are not established yet; define them with the first product change.</Notes>
+  <Product>OpenWearSync</Product>
+  <Targets>
+    <Target>Samsung Galaxy Watch running Wear OS with the approved OpenWearSync APK and Rust JNI library.</Target>
+    <Target>Windows PC running the Rust receiver service and Kotlin Compose Desktop application.</Target>
+    <Target>Samsung Galaxy S25 Ultra Wi-Fi hotspot used only as the required local network access point.</Target>
+  </Targets>
+  <NetworkTopology>
+    <Primary>Galaxy Watch Wi-Fi client to S25 Ultra hotspot to Windows receiver on the same private local network.</Primary>
+    <Transport>Watch initiates an authenticated encrypted TCP or HTTPS session to a listening Windows receiver. Mobile internet is not required for payload transfer.</Transport>
+    <Discovery>Try bounded mDNS or Android NSD discovery where multicast works, then a saved authenticated endpoint, then a manually entered local address.</Discovery>
+    <Blocker>Hotspot client isolation may prevent direct station-to-station traffic. A manual IP cannot bypass isolation; the topology result must be recorded and an alternate local network chosen if required.</Blocker>
+    <Binding>Transport must use the Kotlin-selected Android Wi-Fi Network and prove that payloads do not fall back to Bluetooth or an unintended default route.</Binding>
+  </NetworkTopology>
+  <Packaging>
+    <Wear>Signed Wear OS APK containing Kotlin Compose UI, Android platform adapters, and the shared Rust NDK/JNI library.</Wear>
+    <Windows>Signed Windows Rust receiver package with its durable registry and Kotlin Compose Desktop UI.</Windows>
+    <Protocol>Release artifacts advertise compatible protocol and registry versions and reject incompatible peers before accepting recordings.</Protocol>
+  </Packaging>
+  <FirewallAndStorage>
+    <Firewall>Expose only the configured receiver port on appropriate private Windows networks; do not require a public listener or cloud service.</Firewall>
+    <Destination>Receiver destination is user-selected, validated, and owned by the Windows service. Traversal and silent overwrite are rejected.</Destination>
+    <Persistence>Pairing records, receiver identity, transfer journal, durable ranges, and final fingerprints survive receiver restart within the documented storage boundary.</Persistence>
+  </FirewallAndStorage>
+  <PairingAndUpdates>
+    <Pairing>Initial pairing displays a short user-confirmed code, establishes authenticated encrypted identity, and records the receiver pin.</Pairing>
+    <Revocation>Windows can revoke a watch identity; subsequent status, resume, and upload requests fail closed.</Revocation>
+    <Update>Install, update, migration, downgrade refusal, rollback behavior, and protocol compatibility are release gates for a future packaging change.</Update>
+    <Keys>Protected platform storage holds identity keys; package artifacts contain no private keys or test secrets.</Keys>
+  </PairingAndUpdates>
+  <ReleaseGates>
+    <Gate>Real Galaxy Watch build reads a Samsung Voice Recorder file without root or ADB privileges.</Gate>
+    <Gate>Watch reaches Windows through the S25 Ultra hotspot or the documented approved local topology.</Gate>
+    <Gate>Windows Firewall and destination permissions remain private and bounded.</Gate>
+    <Gate>Pairing, revocation, reconnect, receiver restart, disk-full, corruption, and atomic finalization evidence is retained.</Gate>
+    <Gate>Wear and Windows packages install, negotiate compatible versions, and clean up all session resources.</Gate>
+    <Gate>Matched battery and temperature trials confirm the approved idle and session budgets before production release.</Gate>
+  </ReleaseGates>
+  <OpenReleaseDecisions>
+    <Decision>Minimum Wear OS and Windows versions.</Decision>
+    <Decision>Distribution channel, signing identity, update cadence, and migration policy.</Decision>
+    <Decision>Exact receiver port, destination defaults, chunk budget, session duration, and supported concurrent sessions.</Decision>
+  </OpenReleaseDecisions>
 </GraceDeployment>

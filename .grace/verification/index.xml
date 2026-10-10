@@ -2,7 +2,17 @@
   <VerificationDocuments>
     <VD-MAIN>
       <Path>verification/main.xml</Path>
-      <Owns></Owns>
+      <Owns>
+        <V-M-WEAR-SHELL />
+        <V-M-ANDROID-PLATFORM />
+        <V-M-TRANSFER-CORE />
+        <V-M-DISCOVERY />
+        <V-M-PAIRING-SECURITY />
+        <V-M-WINDOWS-RECEIVER />
+        <V-M-TRANSFER-REGISTRY />
+        <V-M-DESKTOP-UI />
+        <V-M-ENERGY-POLICY />
+      </Owns>
     </VD-MAIN>
   </VerificationDocuments>
 </GraceVerificationIndex>

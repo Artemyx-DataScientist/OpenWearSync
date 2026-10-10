@@ -1,3 +1,102 @@
 <GraceVerificationDocument graceVersion="4.0">
-  <VD-MAIN></VD-MAIN>
+  <VD-MAIN>
+    <V-M-WEAR-SHELL>
+      <Name>Wear Shell Verification</Name>
+      <Module>M-WEAR-SHELL</Module>
+      <Scenarios>
+        <Scenario>Verify Wear OS application builds and runs with circular layout.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+      </Commands>
+    </V-M-WEAR-SHELL>
+
+    <V-M-ANDROID-PLATFORM>
+      <Name>Android Platform Verification</Name>
+      <Module>M-ANDROID-PLATFORM</Module>
+      <Scenarios>
+        <Scenario>Verify MediaStore recording discovery, stability filtering, and non-privileged file streaming.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command>
+      </Commands>
+    </V-M-ANDROID-PLATFORM>
+
+    <V-M-TRANSFER-CORE>
+      <Name>Transfer Engine Verification</Name>
+      <Module>M-TRANSFER-CORE</Module>
+      <Scenarios>
+        <Scenario>Verify bounded chunk streaming, reconciliation, SHA-256 integrity, and cancellation.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/rust-core.ps1</Command>
+      </Commands>
+    </V-M-TRANSFER-CORE>
+
+    <V-M-DISCOVERY>
+      <Name>Network Discovery Verification</Name>
+      <Module>M-DISCOVERY</Module>
+      <Scenarios>
+        <Scenario>Verify Wi-Fi request acquisition, process binding, and bounded NSD/mDNS peer discovery.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command>
+      </Commands>
+    </V-M-DISCOVERY>
+
+    <V-M-PAIRING-SECURITY>
+      <Name>Security Verification</Name>
+      <Module>M-PAIRING-SECURITY</Module>
+      <Scenarios>
+        <Scenario>Verify one-time PIN enrollment, HMAC auth tokens, brute-force rate limits, and replay defense.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/protocol-contract.ps1</Command>
+      </Commands>
+    </V-M-PAIRING-SECURITY>
+
+    <V-M-WINDOWS-RECEIVER>
+      <Name>Windows Receiver Verification</Name>
+      <Module>M-WINDOWS-RECEIVER</Module>
+      <Scenarios>
+        <Scenario>Verify staging storage, atomic publication, fsync durability, and crash recovery.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/receiver-integration.ps1</Command>
+      </Commands>
+    </V-M-WINDOWS-RECEIVER>
+
+    <V-M-TRANSFER-REGISTRY>
+      <Name>Transfer Registry Verification</Name>
+      <Module>M-TRANSFER-REGISTRY</Module>
+      <Scenarios>
+        <Scenario>Verify ledger persistence, duplicate suppression, and manifest state journaling.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/receiver-integration.ps1</Command>
+      </Commands>
+    </V-M-TRANSFER-REGISTRY>
+
+    <V-M-DESKTOP-UI>
+      <Name>Desktop UI Verification</Name>
+      <Module>M-DESKTOP-UI</Module>
+      <Scenarios>
+        <Scenario>Verify Windows desktop UI packaging and service integration.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command>
+      </Commands>
+    </V-M-DESKTOP-UI>
+
+    <V-M-ENERGY-POLICY>
+      <Name>Energy Policy Verification</Name>
+      <Module>M-ENERGY-POLICY</Module>
+      <Scenarios>
+        <Scenario>Verify bounded execution timeouts, prompt cleanup, and idle quiescence.</Scenario>
+      </Scenarios>
+      <Commands>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/device-preflight.ps1</Command>
+      </Commands>
+    </V-M-ENERGY-POLICY>
+  </VD-MAIN>
 </GraceVerificationDocument>

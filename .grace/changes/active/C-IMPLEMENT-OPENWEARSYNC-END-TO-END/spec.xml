@@ -1,0 +1,78 @@
+<GraceChangeSpec graceVersion="4.0" status="approved">
+  <C-IMPLEMENT-OPENWEARSYNC-END-TO-END>
+    <Summary>Implement the complete target OpenWearSync product end to end: a production-oriented, local, authenticated, energy-bounded, resumable Galaxy Watch to Windows Samsung Voice Recorder transfer application using shared Rust and Kotlin UIs, with runnable builds, verified functionality, integration tests, and device-gated acceptance.</Summary>
+    <Problem>The GRACE baseline C-ESTABLISH-OPENWEARSYNC-BASELINE defines architecture, but deliberately forbids product source changes. The user requires the AI coding agent to implement the entire final application, not another documentation-only step or throwaway prototypes. Syncthing-Fork is unsuitable because its continuous background engine drains the watch while the PC is unavailable.</Problem>
+    <Goals>
+      <Goal>Produce a real, installable Wear OS APK and Windows receiver/desktop application implementing the complete approved target architecture, rather than only more specifications.</Goal>
+      <Goal>Use a common Rust library on watch and Windows for protocol, streaming, chunk verification, retry/reconciliation and security, with Kotlin Android platform integration via JNI and Kotlin Compose for Wear OS and Compose Desktop for UI.</Goal>
+      <Goal>Find completed Samsung Voice Recorder audio, stream over a deliberately selected Wi-Fi network (including the Galaxy S25 Ultra hotspot topology), pair devices securely, receive files durably, resume interrupted transfers and avoid duplicate completed results.</Goal>
+      <Goal>Keep app-owned idle CPU/network activity quiescent; make manual transfer first-class and optional automatic transfer Android-OS-cooperative, energy- and thermal-bounded, and explicitly opt-in.</Goal>
+      <Goal>Provide runnable project gates, CI configuration, crash/security/contract tests, signed debug Wear APK, Windows executable/distribution, and hardware validation instructions and evidence collection.</Goal>
+      <Goal>Maintain GRACE module anchors, verification entries and generated source trace annotations under this change; do not treat documentation as a substitute for working software.</Goal>
+    </Goals>
+    <Constraints>
+      <Constraint>The previously proposed C-ESTABLISH-OPENWEARSYNC-BASELINE is cancelled. Use the current repository context as the implementation input, preserve its local edits, and do not treat the cancelled bundle as applied architecture evidence.</Constraint>
+      <Constraint>This is one comprehensive implementation change using the final architecture and independently testable tasks, not a sequence of disposable intermediate products.</Constraint>
+      <Constraint>Use local Wi-Fi for audio, with S25 Ultra acting only as a hotspot. No mandatory phone app, cloud relay, Bluetooth payload transport, generic Syncthing protocol, transcription or audio transcoding.</Constraint>
+      <Constraint>Kotlin owns Android permissions, file/content URI APIs, network selection, lifecycle, jobs/foreground facilities and UI; shared Rust owns versioned transfer data plane; Rust Windows service owns durable disk state, network endpoints and SQLite ledger.</Constraint>
+      <Constraint>Never assume ADB shell file visibility proves unprivileged app access or assume hotspot allows client-to-client TCP/mDNS. Both are release-gating real-device tests; fail or diagnose safely rather than secretly changing product topology.</Constraint>
+      <Constraint>Do not upload files still being recorded. Original watch recordings stay intact. A transfer is complete only after authenticated durable server commit and integrity verification.</Constraint>
+      <Constraint>Stream bounded chunks; never buffer a whole large recording. Receiver must persist durable chunks/checkpoints before acknowledging them, handle cancellation, crash and restart, reject traversal and bound memory/disk resource use.</Constraint>
+      <Constraint>Require protected pairing, authenticated encrypted transport, receiver key pinning and revocation; never disable TLS verification or commit unreviewed home-grown cryptography.</Constraint>
+      <Constraint>Idle watch shall keep no app-owned open socket, persistent Wi-Fi request, wakelock or busy discovery/polling loop. All session endings must release resources, including failures, process cancellation and thermally limited sessions.</Constraint>
+      <Constraint>Do not modify any approved GRACE spec/plan in place. This change has an explicit observed source write scope and durable graph/verification scope; any other scope requires a separate approved change.</Constraint>
+      <Constraint>Define unmeasured toolchain minimums and quantitative energy/throughput thresholds from platform compatibility and hardware evidence; record uncertainty rather than invent compatibility or test passes.</Constraint>
+    </Constraints>
+    <NonGoals>
+      <NonGoal>Creating a second documentation-only architecture baseline.</NonGoal>
+      <NonGoal>Building throwaway Kotlin-only watch or Python/Node receiver prototypes slated for rewrite.</NonGoal>
+      <NonGoal>Cloud storage, internet-accessible receiver, mobile-data relay, mandatory phone companion, peer-to-peer bidirectional synchronization or Bluetooth transfer of large recordings.</NonGoal>
+      <NonGoal>Automatic removal of recordings, upload of actively written audio, conversion/compression of source audio, transcription, or general media synchronization.</NonGoal>
+      <NonGoal>Claiming Samsung-specific file permissions, hotspot reachability, overnight battery performance or Windows packaging correctness without real execution evidence.</NonGoal>
+      <NonGoal>Storing production private signing credentials or long-term pairing secrets in Git.</NonGoal>
+    </NonGoals>
+    <AcceptanceCriteria>
+      <Criterion>An Android Wear OS APK builds and launches with a circular Compose interface that lists eligible Samsung Voice Recorder recordings, pairs with Windows, offers Send New, shows progress and supports pause/cancel/retry with meaningful error states.</Criterion>
+      <Criterion>A Windows Rust receiver service and Compose Desktop UI build and run; receiver can function independently of the open desktop window and persists recording manifests, durable chunk state, identities and transfer history.</Criterion>
+      <Criterion>A shared versioned Rust protocol core is compiled for Windows and Android through a tested JNI boundary; Kotlin operates platform APIs and explicitly binds transfer traffic to the chosen Wi-Fi network.</Criterion>
+      <Criterion>A real watch can send an audio file to the Windows receiver over Wi-Fi; if the Samsung hotspot isolates clients, this is surfaced as a tested topology blocker, not hidden with an unauthorized phone/cloud relay.</Criterion>
+      <Criterion>Unpaired clients cannot upload; pairing resists offline guessing, channel transport is authenticated/encrypted and bound to pinned receiver identity, and device revocation works.</Criterion>
+      <Criterion>Interrupted transfer, duplicated chunks, receiver restart, network loss, checksum mismatch, changed source and storage failure preserve originals and either resume the correct bytes or fail without false complete/duplicate final files.</Criterion>
+      <Criterion>Fully uploaded files are verified for size and cryptographic integrity, durably committed and indexed; repeated finalize is idempotent. High-risk filesystem payloads and excessive resource requests are rejected.</Criterion>
+      <Criterion>Transport and discovery end boundedly when the PC is unavailable; no continuous app-owned Wi-Fi/wakelock/socket remains in idle; optional scheduled work honors Android constraints and user opt-in.</Criterion>
+      <Criterion>Automated Rust, Kotlin, JNI, protocol contract, Windows service integration and lifecycle tests run through documented project commands, and GitHub CI builds representative Windows and Wear OS artifacts.</Criterion>
+      <Criterion>Hardware acceptance scripts and reporting templates are supplied for Galaxy Watch file access, S25 Ultra hotspot reachability, Wi-Fi binding, sustained transfer, thermal state and matched overnight idle battery drain; unexecuted tests are explicitly pending release blockers.</Criterion>
+      <Criterion>The change updates GRACE module/verification references, includes required file-local semantic anchors, passes current selected target/final GRACE lint when tools and hardware evidence allow, and produces no undocumented features or unsupported pass claims.</Criterion>
+    </AcceptanceCriteria>
+    <AffectedAreas>
+      <M-WEAR-SHELL />
+      <M-ANDROID-PLATFORM />
+      <M-TRANSFER-CORE />
+      <M-DISCOVERY />
+      <M-PAIRING-SECURITY />
+      <M-WINDOWS-RECEIVER />
+      <M-TRANSFER-REGISTRY />
+      <M-DESKTOP-UI />
+      <M-ENERGY-POLICY />
+    </AffectedAreas>
+    <VerificationIntent>
+      <ExpectedCommand>cargo test --workspace --locked</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/protocol-contract.ps1</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/receiver-integration.ps1</ExpectedCommand>
+      <ExpectedCommand>grace lint --path . --change C-IMPLEMENT-OPENWEARSYNC-END-TO-END --assertions final</ExpectedCommand>
+      <ExpectedEvidence>Build outputs include an installable Wear OS APK with bundled Android ABI Rust library and a runnable Windows receiver and desktop UI.</ExpectedEvidence>
+      <ExpectedEvidence>Host-run tests cover cryptographic pairing, transfer semantics, corrupt/interrupted/replayed chunks, receiver crash and restart, JNI boundary and energy lifecycle logic.</ExpectedEvidence>
+      <ExpectedEvidence>Real-device acceptance is supported with reproducible evidence; release is gated where the actual Galaxy Watch, S25 Ultra hotspot or battery measurements have not been tested.</ExpectedEvidence>
+      <ExpectedEvidence>Approved GRACE artifacts are reflected in durable module and verification projections only through the approved execution lifecycle.</ExpectedEvidence>
+    </VerificationIntent>
+    <Assumptions>
+      <Assumption>C-ESTABLISH-OPENWEARSYNC-BASELINE was cancelled after local context edits; validate the current context files and do not infer that the cancelled bundle was applied.</Assumption>
+      <Assumption>The expected nine GRACE module IDs and five DF-* data flows will exist after the baseline is applied. Adjustments require specification reconciliation before plan approval, not silent scope expansion.</Assumption>
+      <Assumption>Wear OS MediaStore or an OS-permitted user-grant mechanism can provide unprivileged access to completed recordings; if not, surface a blocking compatibility finding and do not request root/ADB shell privileges.</Assumption>
+      <Assumption>The S25 Ultra hotspot is a local Wi-Fi access point used by both watch and PC; peer routing and discovery behavior must be tested.</Assumption>
+      <Assumption>Exact Android SDK/API, Gradle/Kotlin versions, cryptographic library choice and quantitative performance thresholds will be selected on evidence before approval/implementation; no placeholder library choice implies permission to skip security review.</Assumption>
+    </Assumptions>
+  </C-IMPLEMENT-OPENWEARSYNC-END-TO-END>
+</GraceChangeSpec>

@@ -1,5 +1,38 @@
 <GracePrinciples graceVersion="4.0">
-  <Principle>Contract-first changes: clarify scope and verification before implementation.</Principle>
-  <Principle>Keep semantic anchors stable and grep-friendly.</Principle>
-  <Principle>Use assertions, scopes, and tests as fresh completion evidence.</Principle>
+  <Governance>
+    <Principle>Contract-first GRACE changes establish ownership, invariants, verification and scope before source implementation.</Principle>
+    <Principle>Normative context, graph and verification projections are durable source of truth; explanatory documents cannot override them.</Principle>
+    <Principle>Semantic anchors remain stable, attribute-free tags for modules, data flows, graph documents and verification entries.</Principle>
+    <Principle>Approval, execution evidence, and applied lifecycle state are distinct. A planned or approved contract is not a passing test.</Principle>
+  </Governance>
+  <Architecture>
+    <Principle>Build one target architecture directly: shared Rust transfer contracts, Kotlin platform ownership, and Compose user interfaces on the named platforms.</Principle>
+    <Principle>Keep ownership singular. Kotlin owns Android lifecycle, permissions, network selection, and energy scheduling; Rust owns portable transfer correctness and the Windows receiver; UI consumes owner projections.</Principle>
+    <Principle>Prefer narrow versioned boundaries and explicit state over a second local source of truth or a broad aggregate bridge.</Principle>
+    <Principle>Do not add a permanent watch background daemon, a phone data relay, or temporary rewrite stages to solve a one-way transfer problem.</Principle>
+  </Architecture>
+  <IntegrityAndRecovery>
+    <Principle>At-least-once network messages must converge to exactly-once durable file outcome through stable logical identity, idempotent requests, durable checkpoints, and atomic publication.</Principle>
+    <Principle>A receiver acknowledges only durable state that survives its documented crash boundary.</Principle>
+    <Principle>Corrupt, reordered, replayed, incomplete, or incompatible input fails closed without modifying the original recording.</Principle>
+    <Principle>Every recovery and cleanup path is cancellable, bounded, observable, and safe to repeat.</Principle>
+  </IntegrityAndRecovery>
+  <EnergyAndLifecycle>
+    <Principle>True idle is inactive: no persistent socket, Wi-Fi request, wake lock, filesystem polling, or perpetual discovery listener remains on the watch.</Principle>
+    <Principle>Discovery, retries, file reads, transfer sessions, and scheduled work have explicit deadlines and ceilings.</Principle>
+    <Principle>Release network, wake, callback, descriptor, coroutine, and subscription resources on success, cancellation, timeout, error, receiver loss, and thermal stop.</Principle>
+    <Principle>Energy behavior is measured on the target watch with matched controls; assumed battery or thermal results are not implementation guarantees.</Principle>
+  </EnergyAndLifecycle>
+  <SecurityAndPrivacy>
+    <Principle>Pairing is user-confirmed, revocable, identity-pinned, and separate from endpoint discovery.</Principle>
+    <Principle>Encrypted transport, replay defense, bounded resource admission, safe paths, and protected key storage are mandatory protocol properties.</Principle>
+    <Principle>Diagnostics minimize recording metadata and redact filenames unless explicit diagnostic mode is enabled.</Principle>
+    <Principle>Security review precedes selection of concrete cryptographic crates and pairing protocol details.</Principle>
+  </SecurityAndPrivacy>
+  <Evidence>
+    <Principle>Keep confirmed product decisions separate from unverified Samsung access, hotspot routing, network binding, and battery assumptions.</Principle>
+    <Principle>Use local tests for code contracts and physical tests for device, topology, file-access, thermal, and energy claims.</Principle>
+    <Principle>Never label an unexecuted gate passed and never infer third-party app access from ADB shell visibility.</Principle>
+    <Principle>When a requirement is unknown, preserve it as a named acceptance gate rather than inventing a guarantee.</Principle>
+  </Evidence>
 </GracePrinciples>

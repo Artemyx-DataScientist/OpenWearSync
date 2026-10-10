@@ -2,7 +2,22 @@
   <GraphDocuments>
     <GD-MAIN>
       <Path>graph/main.xml</Path>
-      <Owns></Owns>
+      <Owns>
+        <M-WEAR-SHELL />
+        <M-ANDROID-PLATFORM />
+        <M-TRANSFER-CORE />
+        <M-DISCOVERY />
+        <M-PAIRING-SECURITY />
+        <M-WINDOWS-RECEIVER />
+        <M-TRANSFER-REGISTRY />
+        <M-DESKTOP-UI />
+        <M-ENERGY-POLICY />
+        <DF-RECORDING-MANIFEST />
+        <DF-DISCOVERY-AND-PAIRING />
+        <DF-ENCRYPTED-CHUNK-UPLOAD />
+        <DF-DURABLE-CHECKPOINT />
+        <DF-LIFECYCLE-CLEANUP />
+      </Owns>
     </GD-MAIN>
   </GraphDocuments>
 </GraceGraphIndex>

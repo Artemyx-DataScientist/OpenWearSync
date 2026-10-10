@@ -1,14 +1,80 @@
 <GraceRequirements graceVersion="4.0">
   <ProjectName>OpenWearSync</ProjectName>
-  <Annotation>OpenWearSync project bootstrapped with GRACE 4</Annotation>
-  <Keywords>OpenWearSync, GRACE, contract-first development</Keywords>
-  <Goals>
-    <Goal>Begin development of OpenWearSync using the GRACE 4 contract-first workflow.</Goal>
-  </Goals>
+  <Status>Approved product baseline; implementation and physical-device gates remain separate follow-up work.</Status>
+  <Purpose>OpenWearSync is a one-way, lossless transfer system for large Samsung Voice Recorder files from a Galaxy Watch running Wear OS to a Windows PC over a local Wi-Fi topology.</Purpose>
+  <Problem>Continuous background synchronization caused unacceptable watch battery drain when the Windows receiver was unavailable. OpenWearSync uses bounded, user-visible or OS-cooperative sessions instead of a persistent synchronizer.</Problem>
   <Users>
-    <User>OpenWearSync developers and maintainers</User>
+    <User>Wear OS owner who selects or schedules eligible recordings for transfer.</User>
+    <User>Windows owner who pairs watches, runs the receiver, selects a destination, and inspects transfer history.</User>
+    <User>Maintainer who needs durable protocol, security, energy, and evidence contracts.</User>
   </Users>
-  <Constraints>
-    <Constraint>Product requirements and implementation technology are not established yet; do not infer them.</Constraint>
-  </Constraints>
+  <ProductBoundary>
+    <Direction>Only the watch sends recordings to the Windows receiver. The phone hotspot may forward packets but is not an application relay or data processor.</Direction>
+    <Transport>Recording payloads use Wi-Fi and an authenticated encrypted session. Bluetooth, cloud hosting, mobile-data relay, and mandatory phone software are outside the product.</Transport>
+    <Source>Samsung Voice Recorder files remain on the watch unless a future, separately approved deletion feature is introduced; this baseline never deletes originals.</Source>
+    <Destination>The receiver owns its configured destination directory and publishes immutable final-file identity through the storage registry.</Destination>
+  </ProductBoundary>
+  <SupportedTopology>
+    <Topology>Galaxy Watch client to Samsung Galaxy S25 Ultra hotspot to Windows PC receiver.</Topology>
+    <Topology>Private local LAN where the watch can reach the receiver by TCP or HTTPS.</Topology>
+    <Constraint>Hotspot station-to-station unicast and multicast forwarding are unverified and must be demonstrated on target hardware.</Constraint>
+    <Fallback>Use a saved authenticated endpoint or a manually entered local address when discovery is unavailable and routing still permits reachability.</Fallback>
+  </SupportedTopology>
+  <TransferInvariants>
+    <NetworkDelivery>Network delivery is at-least-once. Reconnects, retries, duplicate requests, and reordered requests are expected protocol inputs.</NetworkDelivery>
+    <DurableOutcome>Exactly-once durable file outcome means a logical recording produces one committed receiver artifact and one consistent registry result, even when protocol messages are delivered more than once.</DurableOutcome>
+    <Acknowledgement>Receiver acknowledgements describe checkpoint data durably persisted in the registry and recoverable after a crash; in-memory bytes are never acknowledged as durable.</Acknowledgement>
+    <Resumption>After reconnect or receiver restart, the receiver returns durable ranges and the watch resends only data that is not recorded as durable, subject to bounded retry policy.</Resumption>
+    <Integrity>Every chunk is length- and digest-checked, the manifest is revalidated at completion, and the receiver records a final content fingerprint before atomic publication.</Integrity>
+    <Collision>Existing destination files are never silently overwritten; a collision is rejected or resolved by a deterministic safe name.</Collision>
+  </TransferInvariants>
+  <RecordingReadiness>
+    <StableFile>A recording is eligible only after a conservative stable-size and metadata policy says it is not actively growing. Stability is a heuristic and must not be presented as proof of recorder completion.</StableFile>
+    <ChangingFile>A file that changes during manifest or chunk reads is deferred or version-restarted and is never reported as a successful complete recording.</ChangingFile>
+    <AccessGate>Real hardware must demonstrate that a non-root third-party Wear OS application can open and read a Samsung Voice Recorder recording without relying on ADB shell visibility.</AccessGate>
+    <ReadPath>MediaStore, SAF, or another permitted descriptor path is selected only after the target watch and firmware access test records the supported mechanism.</ReadPath>
+  </RecordingReadiness>
+  <SecurityRequirements>
+    <Pairing>Initial pairing requires a user-confirmed one-time code through a reviewed PAKE-style or equivalent exchange and persists a revocable receiver identity pin.</Pairing>
+    <Authentication>Only explicitly paired watch identities may create or continue upload sessions.</Authentication>
+    <Encryption>Control and payload traffic use TLS or an equally reviewed authenticated encrypted channel; discovered hostnames and IP addresses are locators, not identities.</Encryption>
+    <Replay>Session identity, sequence, and completion checks reject replayed or stale messages.</Replay>
+    <ResourceLimits>Manifests, chunk counts, chunk sizes, concurrent sessions, path components, disk reservations, and request time are bounded before expensive work starts.</ResourceLimits>
+    <PathSafety>Receiver paths are derived from its configured destination and a safe display name; traversal, absolute paths, device names, and arbitrary destinations are rejected.</PathSafety>
+    <Secrets>Pairing keys and pins use platform-protected storage and are not committed to the repository or emitted in ordinary diagnostics.</Secrets>
+  </SecurityRequirements>
+  <EnergyRequirements>
+    <Idle>True idle has no app-owned persistent socket, Wi-Fi request, wake lock, file polling loop, or perpetual multicast listener on the watch.</Idle>
+    <Session>Long transfers run only in a user-visible foreground or OS-supported scheduled context and retain a hard deadline, cancellation path, and energy eligibility policy.</Session>
+    <Retry>Discovery and reconnect retries are bounded by attempt count, backoff, and session deadline; an unavailable PC does not create an overnight loop.</Retry>
+    <Cleanup>Success, cancellation, timeout, error, receiver loss, and thermal stop release sockets, callbacks, network requests, subscriptions, and wake resources before returning to idle.</Cleanup>
+    <Measurement>Release approval requires matched on-device battery and temperature trials. The proposed acceptance target is median excess overnight idle drain no greater than 2 percentage points over 8 hours, pending calibration on target hardware.</Measurement>
+  </EnergyRequirements>
+  <AcceptanceGates>
+    <Gate>Non-privileged Samsung Voice Recorder read on a real Galaxy Watch.</Gate>
+    <Gate>Watch-to-Windows TCP or HTTPS reachability through the S25 Ultra hotspot, with client-isolation behavior recorded.</Gate>
+    <Gate>Explicit binding to the selected Android Wi-Fi Network rather than Bluetooth or whichever network happens to be default.</Gate>
+    <Gate>Discovery behavior with multicast permitted, blocked, and changed addresses; saved and manual endpoint fallback when routing permits.</Gate>
+    <Gate>Interrupted transfer at a known progress point, receiver crash or restart, corrupt chunk, duplicate delivery, disk-full condition, and final atomic commit.</Gate>
+    <Gate>Pairing, revocation, identity pinning, replay rejection, traversal rejection, and bounded oversized-request behavior.</Gate>
+    <Gate>Cleanup evidence for success, cancellation, timeout, failure, and thermal stop plus matched idle battery and temperature measurements.</Gate>
+  </AcceptanceGates>
+  <ConfirmedFacts>
+    <Fact>Galaxy Watch recordings have been observed through ADB under a Recordings/Voice Recorder path.</Fact>
+    <Fact>Syncthing-Fork previously transferred the recordings but created unacceptable sustained activity when its peer was unavailable.</Fact>
+    <Fact>The S25 Ultra hotspot is the required primary network topology and is not a processing intermediary.</Fact>
+    <Fact>The target direction is shared Rust transfer logic with Kotlin platform and user-interface integration on Wear OS and Windows.</Fact>
+  </ConfirmedFacts>
+  <UnverifiedAssumptions>
+    <Assumption>Third-party app access to Samsung recorder content is available through a supported non-root API on the target firmware.</Assumption>
+    <Assumption>The hotspot forwards station-to-station unicast and, where applicable, multicast discovery.</Assumption>
+    <Assumption>Native Rust sockets can bind to the Kotlin-selected Android Network on all supported Wear OS versions.</Assumption>
+    <Assumption>Minimum OS versions, package distribution, exact pairing UX, cryptographic crate selection, session duration, and numeric throughput targets will be set after review and device measurement.</Assumption>
+  </UnverifiedAssumptions>
+  <NonGoals>
+    <Item>Syncthing protocol compatibility or generic bidirectional directory synchronization.</Item>
+    <Item>Bluetooth payload transport, cloud service, mobile-data relay, or compulsory phone companion.</Item>
+    <Item>Uploading growing recordings, transcoding, transcription, or deleting originals by default.</Item>
+    <Item>Throwaway intermediate implementations before the approved target architecture is built.</Item>
+  </NonGoals>
 </GraceRequirements>

@@ -1,10 +1,53 @@
 <GraceTechnology graceVersion="4.0">
-  <Language>Not established yet</Language>
-  <Runtime>Not established yet</Runtime>
-  <Framework>Not established yet</Framework>
-  <TestingStack>Not established yet</TestingStack>
-  <Observability>Not established yet</Observability>
-  <OperationalConstraints>
-    <Constraint>Prefer existing project libraries and established repository patterns.</Constraint>
-  </OperationalConstraints>
+  <Project>OpenWearSync</Project>
+  <ArchitectureStatus>Target architecture is selected for direct implementation; exact toolchain versions and cryptographic crate choices remain pending review and device compatibility work.</ArchitectureStatus>
+  <PortableRustCore>
+    <Language>Rust shared by the Wear OS native library and Windows receiver.</Language>
+    <Responsibilities>Versioned wire types, recording manifests, bounded chunk streaming, hashing, transfer state, checkpoint negotiation, idempotent request handling, cancellation, and protocol compatibility.</Responsibilities>
+    <Boundary>Rust is a cancellable component invoked by Kotlin on Wear OS and owns the receiver service on Windows. It does not become a permanent autonomous watch daemon.</Boundary>
+    <Interface>Expose a narrow versioned FFI surface for file-descriptor reads, selected-network identity, cancellation, progress, and terminal outcomes.</Interface>
+    <Interface>Expose a versioned HTTPS session contract for status, transfer creation, durable range query, chunk upload, completion, and abort.</Interface>
+  </PortableRustCore>
+  <WearOsPlatform>
+    <Language>Kotlin.</Language>
+    <Ui>Compose for Wear OS with circular-screen layouts and explicit manual session controls.</Ui>
+    <Ownership>Kotlin owns Android lifecycle, permissions, MediaStore or SAF access, file descriptors, Wi-Fi Network acquisition, notifications, foreground or scheduled work, and energy eligibility.</Ownership>
+    <NativeBridge>Android NDK loads the shared Rust core as a cdylib through a narrow JNI adapter; no Kotlin aggregate state may claim native transfer success before an owner result.</NativeBridge>
+    <Scheduling>Use supported user-initiated foreground or OS-cooperative job facilities. Do not add a persistent watch polling engine.</Scheduling>
+  </WearOsPlatform>
+  <WindowsReceiver>
+    <Language>Rust.</Language>
+    <Runtime>Tokio for bounded asynchronous work and Axum or an equivalent reviewed HTTP server for the authenticated receiver surface.</Runtime>
+    <Storage>SQLite or an equivalent durable registry records transfer identity, chunk ranges, checkpoints, final fingerprint, and commit state.</Storage>
+    <Ownership>The Rust receiver owns disk correctness, atomic finalization, resource limits, and recovery when the Kotlin desktop UI is closed.</Ownership>
+    <Network>Bind only to an explicit private-network listener and document the Windows Firewall rule and listen address.</Network>
+  </WindowsReceiver>
+  <DesktopUi>
+    <Language>Kotlin.</Language>
+    <Framework>Compose Desktop.</Framework>
+    <Ownership>The desktop UI owns presentation, pairing actions, destination selection, settings, history, and diagnostics. It consumes receiver-owned projections and cannot fabricate durable transfer state.</Ownership>
+    <Lifecycle>Service autostart and tray behavior are user-configurable; the receiver remains correct when the main window is closed.</Lifecycle>
+  </DesktopUi>
+  <ProtocolBoundaries>
+    <Versioning>Wire protocol, FFI surface, manifest schema, and durable registry migrations are versioned independently and reject incompatible versions before transfer.</Versioning>
+    <Streaming>Audio is streamed from a descriptor through bounded buffers; whole-file JVM or Rust heap buffering is prohibited.</Streaming>
+    <Hashing>Each chunk has a defined digest and the receiver stores a full final fingerprint after manifest and range validation. The algorithm and compatibility policy are fixed in a future security review.</Hashing>
+    <NetworkBinding>Android Kotlin selects the Wi-Fi Network and passes its identity or a bound socket to Rust; a connected Bluetooth route is never treated as payload transport.</NetworkBinding>
+    <Cancellation>Cancellation tokens cross the Kotlin-to-Rust boundary and terminal cleanup is idempotent.</Cancellation>
+  </ProtocolBoundaries>
+  <PlatformKeystores>
+    <Wear>Watch identity material and receiver pins use Android-protected storage.</Wear>
+    <Windows>Receiver identity keys and pairing records use Windows-protected storage appropriate to the packaged application.</Windows>
+    <Rule>Secrets never appear in source, test fixtures, ordinary logs, or public repository artifacts.</Rule>
+  </PlatformKeystores>
+  <ToolchainAndTesting>
+    <Build>Future implementation changes will establish the Rust workspace, Android NDK/JNI build, Wear APK, Windows receiver package, and Compose Desktop package in their own approved scope.</Build>
+    <Categories>Rust unit and property tests; cross-language protocol tests; JNI and Kotlin lifecycle tests; Windows receiver integration tests; security tests; network interruption and corruption tests; physical Wear OS, hotspot, battery, thermal, and packaging gates.</Categories>
+    <Evidence>Local compilation and deterministic tests establish code contracts only. Samsung file access, hotspot forwarding, Wi-Fi binding on the target firmware, and overnight energy behavior require physical-device evidence.</Evidence>
+  </ToolchainAndTesting>
+  <DeferredChoices>
+    <Choice>Minimum Wear OS and Android versions and exact packaging/distribution targets.</Choice>
+    <Choice>Reviewed PAKE and TLS crate selection, key rotation, and revocation storage policy.</Choice>
+    <Choice>Chunk size, concurrency, session deadline, and throughput budgets after measured hardware trials.</Choice>
+  </DeferredChoices>
 </GraceTechnology>

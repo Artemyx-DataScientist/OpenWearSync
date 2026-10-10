@@ -1,0 +1,29 @@
+<GraceChangeDesignContext graceVersion="4.0">
+  <Change>C-IMPLEMENT-OPENWEARSYNC-END-TO-END</Change>
+  <NormativeStatus>non-normative</NormativeStatus>
+  <Rationale>Corrects the previous scope mismatch: baseline GRACE documentation is not an implementation. The earlier baseline bundle was cancelled by the user; this change explicitly authorizes writing and testing the whole target Rust/Kotlin product from the current context files, with one final architecture and task-level parallelizable dependencies.</Rationale>
+  <Alternatives>
+    <Alternative>Patching the already approved C-ESTABLISH-OPENWEARSYNC-BASELINE plan to add source writes: rejected by GRACE 4 approved plan immutability and the mismatch with its defined documentation-only scope.</Alternative>
+    <Alternative>Creating a sequence of prototype applications and rewriting them afterward: rejected, the whole target architecture will be implemented directly.</Alternative>
+    <Alternative>Kotlin-only watch sender and Rust receiver: technically viable but duplicates core contract logic and violates the selected shared Rust design.</Alternative>
+    <Alternative>Running permanent Syncthing-like watch daemon: rejected for unacceptable idle resource usage.</Alternative>
+    <Alternative>Phone/cloud relay to compensate for hotspot client isolation: out of scope; topology must be diagnosed and reviewed.</Alternative>
+  </Alternatives>
+  <DeferredDecisions>
+    <Decision>Pin tested Android/Wear OS targetSdk/minSdk and Kotlin/Compose/Gradle/Rust toolchain compatibility from the local build environment before approving the executable plan.</Decision>
+    <Decision>Choose reviewed Rust PAKE and TLS crates with adequate support on Android ARM64 and Windows; user-confirmed one-time short code must use an offline-guess-resistant authenticated enrollment mechanism.</Decision>
+    <Decision>Validate Galaxy Watch Samsung Voice Recorder read access in a normal non-privileged APK. Android scoped storage and provider availability can vary by watch generation.</Decision>
+    <Decision>Validate S25 Ultra hotspot station-to-station TCP forwarding and multicast; manual IP does not override hotspot client isolation.</Decision>
+    <Decision>Define actual time and power budgets from measured physical trials, including idle drain and charging restrictions; candidate threshold is excess drain at most two percentage points over eight matched idle hours, subject to evidence.</Decision>
+  </DeferredDecisions>
+  <Scenarios>
+    <Scenario>User opens watch UI, connects to Wi-Fi hotspot, pairs with Windows, taps Send New; file arrives without original deletion or intermediate phone app.</Scenario>
+    <Scenario>Computer offline: discovery tries a bounded time, user sees clear status and watch network resources are promptly released; no overnight drain from retries.</Scenario>
+    <Scenario>Recording is 1 GiB and upload fails at 70 percent: next eligible session reconciles durable receiver ranges, sends only missing content and commits one verified file.</Scenario>
+    <Scenario>Receiver disk full or reboot halfway through a chunk: no acknowledgement of non-durable bytes and later reconciliation is safe.</Scenario>
+    <Scenario>Untrusted hotspot client guesses discovery address or pairing code: unauthenticated traffic is rejected with rate limits and no plaintext transfer.</Scenario>
+    <Scenario>Watch stops recording during transfer or content identity changes: abort/defer unstable content and preserve originals.</Scenario>
+    <Scenario>Wear OS removes foreground execution permission or imposes background restrictions: an explicit user-visible fallback and durable resume state are used; no hidden self-restarting service.</Scenario>
+    <Scenario>No hardware is accessible to CI: all code-build and host tests still run, while measured hardware release gates remain pending rather than fabricated.</Scenario>
+  </Scenarios>
+</GraceChangeDesignContext>
