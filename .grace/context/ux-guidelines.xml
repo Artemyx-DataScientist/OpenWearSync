@@ -1,0 +1,5 @@
+<GraceUXGuidelines graceVersion="4.0">
+  <Applicability>applicable</Applicability>
+  <Audience>OpenWearSync developers and maintainers</Audience>
+  <Guideline>User experience constraints are not established yet; define accessibility and interaction requirements with the first product change.</Guideline>
+</GraceUXGuidelines>

@@ -1,0 +1,14 @@
+<GraceRequirements graceVersion="4.0">
+  <ProjectName>OpenWearSync</ProjectName>
+  <Annotation>OpenWearSync project bootstrapped with GRACE 4</Annotation>
+  <Keywords>OpenWearSync, GRACE, contract-first development</Keywords>
+  <Goals>
+    <Goal>Begin development of OpenWearSync using the GRACE 4 contract-first workflow.</Goal>
+  </Goals>
+  <Users>
+    <User>OpenWearSync developers and maintainers</User>
+  </Users>
+  <Constraints>
+    <Constraint>Product requirements and implementation technology are not established yet; do not infer them.</Constraint>
+  </Constraints>
+</GraceRequirements>

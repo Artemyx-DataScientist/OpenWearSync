@@ -1,0 +1,5 @@
+<GraceDeployment graceVersion="4.0">
+  <Applicability>applicable</Applicability>
+  <Target>Not established yet</Target>
+  <Notes>Deployment target and release gates are not established yet; define them with the first product change.</Notes>
+</GraceDeployment>
