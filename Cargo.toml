@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/transfer-core", "crates/security", "crates/receiver", "crates/android-ffi"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.metadata.openwearsync]
+status = "bootstrap"

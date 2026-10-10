@@ -1,0 +1,9 @@
+[package]
+name = "openwearsync-receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
