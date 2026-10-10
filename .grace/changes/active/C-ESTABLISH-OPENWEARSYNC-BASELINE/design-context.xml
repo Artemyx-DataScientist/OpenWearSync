@@ -1,0 +1,27 @@
+<GraceChangeDesignContext graceVersion="4.0">
+  <Change>C-ESTABLISH-OPENWEARSYNC-BASELINE</Change>
+  <NormativeStatus>non-normative</NormativeStatus>
+  <Rationale>OpenWearSync replaces a continuously active general-purpose synchronizer with a session-scoped, one-way recording transporter. Architectural contracts must be designed up front because AI coding agents will implement the target structure directly rather than disposable prototypes. The detailed design proposal is docs/architecture/2026-10-10-openwearsync-proposed-baseline.md; this companion is explanatory and cannot override spec.xml.</Rationale>
+  <Alternatives>
+    <Alternative>Syncthing-compatible peer: rejected due to unnecessary bidirectional state, discovery and background engine complexity for one-way audio upload.</Alternative>
+    <Alternative>Kotlin-only on watch: feasible, but shared Rust protocol and reconciliation logic is preferred for cross-platform contract reuse.</Alternative>
+    <Alternative>Bluetooth payload transport: rejected for large recordings; phone hotspot Wi-Fi is the target topology.</Alternative>
+    <Alternative>Mandatory Android phone relay: rejected as an additional data path and deployment dependency; hotspot forwarding is sufficient only if client-to-client routing is available.</Alternative>
+    <Alternative>Permanent background watch service: rejected due to energy and lifecycle costs.</Alternative>
+  </Alternatives>
+  <DeferredDecisions>
+    <Decision>Confirm the precise Samsung Voice Recorder content-access mechanism for a non-privileged Wear OS application on the target watch.</Decision>
+    <Decision>Measure direct watch-to-PC reachability and mDNS behavior on S25 Ultra hotspot; determine supported fallback for hotspot client isolation.</Decision>
+    <Decision>Validate native Rust socket binding to the Kotlin-selected Android Wi-Fi Network across supported Wear OS versions and document DNS handling.</Decision>
+    <Decision>Choose PAKE/pairing UX and Rust cryptographic crates after security review; pin endpoint identity, never rely only on discoverable hostnames.</Decision>
+    <Decision>Set minimum Android/Wear OS versions, packaging/distribution, charging thresholds, session duration and quantitative battery budgets after device testing.</Decision>
+  </DeferredDecisions>
+  <Scenarios>
+    <Scenario>PC unavailable: watch discovery times out, does not retry indefinitely, releases Wi-Fi request, and returns to idle.</Scenario>
+    <Scenario>Hotspot reconnect mid-recording: receiver tells watch the last durable checkpoint; same file resumes without duplicate final artifact.</Scenario>
+    <Scenario>Live Voice Recorder session: active or potentially growing file is deferred until a safe stable-file policy accepts it.</Scenario>
+    <Scenario>Windows app restarts or disk fills: incomplete .part file and journal are recoverable; original on watch is not modified.</Scenario>
+    <Scenario>Pairing attempt from an unrelated hotspot client: without authorized pairing credentials the receiver refuses payload acceptance.</Scenario>
+    <Scenario>Overnight standby: with no eligible scheduled transfer, OpenWearSync creates no persistent Wi-Fi request, wakelock, connection or polling loop.</Scenario>
+  </Scenarios>
+</GraceChangeDesignContext>

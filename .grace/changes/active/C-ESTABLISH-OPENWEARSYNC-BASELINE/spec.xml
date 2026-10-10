@@ -1,0 +1,60 @@
+<GraceChangeSpec graceVersion="4.0" status="draft">
+  <C-ESTABLISH-OPENWEARSYNC-BASELINE>
+    <Summary>Establish the approved, verifiable product and technical baseline for OpenWearSync, a Wear OS to Windows voice-recording transfer system over local Wi-Fi.</Summary>
+    <Problem>Syncthing-Fork sustained background network activity on Galaxy Watch and caused unacceptable battery drain even when the Windows computer was unavailable. OpenWearSync currently has a GRACE 4 bootstrap but no product-specific contracts, modules, or verification projection.</Problem>
+    <Goals>
+      <Goal>Provide one-way, lossless transfer of large Samsung Voice Recorder files from Galaxy Watch to a Windows PC over local Wi-Fi, including a Samsung phone hotspot.</Goal>
+      <Goal>Specify the target architecture without temporary rewrite stages: shared Rust transfer core on watch and Windows; Kotlin platform integration and Compose for Wear OS; Rust receiver and Kotlin Compose Desktop UI.</Goal>
+      <Goal>Define idempotent, resumable, authenticated, encrypted sessions with durable receiver checkpoints and no automatic deletion of source recordings.</Goal>
+      <Goal>Define energy-bounded behavior: no persistent watch discovery engine, no unbounded retry loops, and resource cleanup on completion, cancellation, timeout, or failure.</Goal>
+      <Goal>Establish normative GRACE context, current graph ownership, matching verification contracts, project layout, and measurable release gates in a subsequent approved execution.</Goal>
+    </Goals>
+    <Constraints>
+      <Constraint>Target devices are Samsung Galaxy Watch with Wear OS and a Windows PC; Galaxy S25 Ultra Wi-Fi hotspot is a required network topology, not a data-processing intermediary.</Constraint>
+      <Constraint>Files move over Wi-Fi, not Bluetooth; no cloud server or mandatory phone companion application.</Constraint>
+      <Constraint>Rust handles portable protocol, chunking, hashing, transfer state, and Windows receive/server logic. Kotlin owns Android lifecycle, permissions, user interface, Wi-Fi selection, and energy policy.</Constraint>
+      <Constraint>Long-running user-initiated transfers must use supported Wear OS foreground or job facilities; automatic operation must be OS-cooperative, bounded, and opt-in.</Constraint>
+      <Constraint>Do not assume that ADB shell visibility proves third-party app file access; verify Samsung recording reads without elevated privileges on real hardware.</Constraint>
+      <Constraint>Do not assume Samsung hotspot allows station-to-station traffic or multicast discovery; demonstrate watch-to-PC connectivity and provide a manual endpoint fallback when routing is possible.</Constraint>
+      <Constraint>No product implementation, durable graph/verification projection updates, or approved plan may be written while this change remains a draft specification.</Constraint>
+    </Constraints>
+    <NonGoals>
+      <NonGoal>Syncthing protocol compatibility or generic peer-to-peer bidirectional directory synchronization.</NonGoal>
+      <NonGoal>Bluetooth transport for recording payloads, external hosting, mobile-data relay, or compulsory Samsung phone application.</NonGoal>
+      <NonGoal>Uploading still-growing recordings, transcoding audio, transcription, or deleting originals by default.</NonGoal>
+      <NonGoal>Creating throwaway intermediate implementations before the approved target architecture is built.</NonGoal>
+    </NonGoals>
+    <AcceptanceCriteria>
+      <Criterion>A versioned baseline defines boundaries for watch shell, Android platform adapter, shared Rust core, discovery, authentication, receiver, storage registry, desktop UI, and energy policy, with explicit interfaces and ownership.</Criterion>
+      <Criterion>Requirements establish exactly-once durable file outcome under reconnect, receiver restart, duplicate delivery, corrupt chunks, and interrupted transfers, without claiming network exactly-once delivery.</Criterion>
+      <Criterion>Security contracts cover authenticated pairing, encrypted transfer, pinned receiver identity, path traversal prevention, and bounded resource consumption.</Criterion>
+      <Criterion>Energy contracts specify idle behavior, event and timeout ownership, retry ceilings, cleanup paths, and on-device comparative battery tests.</Criterion>
+      <Criterion>Product contracts include Samsung recording file access tests, hotspot station-to-station connectivity tests, Wi-Fi network binding tests, and fallback to saved/manual server address.</Criterion>
+      <Criterion>Proposed context files, module graph and one-to-one verification entries will be created through a subsequent approved GraceChangePlan, with lint and review evidence.</Criterion>
+      <Criterion>The proposed baseline distinguishes confirmed decisions from unverified physical-platform assumptions and assigns acceptance gates to those assumptions.</Criterion>
+    </AcceptanceCriteria>
+    <AffectedAreas>
+      <M-WEAR-SHELL />
+      <M-ANDROID-PLATFORM />
+      <M-TRANSFER-CORE />
+      <M-DISCOVERY />
+      <M-PAIRING-SECURITY />
+      <M-WINDOWS-RECEIVER />
+      <M-TRANSFER-REGISTRY />
+      <M-DESKTOP-UI />
+      <M-ENERGY-POLICY />
+    </AffectedAreas>
+    <VerificationIntent>
+      <ExpectedCommand>grace lint --path . --assertions current</ExpectedCommand>
+      <ExpectedCommand>grace lint --path . --parallel-preflight</ExpectedCommand>
+      <ExpectedEvidence>Draft GRACE artifacts parse and satisfy GRACE 4 grammar; approval is separate from validation.</ExpectedEvidence>
+      <ExpectedEvidence>After approval and implementation: Rust unit and integration tests, Kotlin and JNI tests, Windows build, Android/Wear OS device tests, hotspot routing tests, interrupted-transfer tests, and comparative battery/thermal measurements.</ExpectedEvidence>
+    </VerificationIntent>
+    <Assumptions>
+      <Assumption>Recording storage is conventionally visible at /sdcard/Recordings/Voice Recorder/ via ADB; app-level access must be demonstrated separately.</Assumption>
+      <Assumption>Watch and PC connect as Wi-Fi clients to the S25 Ultra hotspot; direct client traffic and multicast discovery remain unverified.</Assumption>
+      <Assumption>Release targets, minimum Wear OS/Android versions, precise pairing UX, distribution method, and numerical performance thresholds remain to be validated and finalized without weakening security or energy requirements.</Assumption>
+      <Assumption>Automatic synchronization does not require waking immediately upon each file-system change; bounded user-invoked and scheduled sessions are acceptable.</Assumption>
+    </Assumptions>
+  </C-ESTABLISH-OPENWEARSYNC-BASELINE>
+</GraceChangeSpec>
