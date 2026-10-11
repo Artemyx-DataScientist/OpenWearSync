@@ -148,6 +148,13 @@ pub fn generate_pairing_pin() -> String {
     format!("{:06}", num)
 }
 
+/// Generates a cryptographically secure 32-byte random array.
+pub fn generate_random_bytes_32() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
+}
+
 /// State for one-time code pairing enrollment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingSession {

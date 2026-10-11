@@ -114,6 +114,23 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
         }
     }
 
+    fun getServerFingerprint(): String? {
+        return try {
+            val url = URL("$baseUrl/v1/status")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 1500
+                readTimeout = 1500
+                requestMethod = "GET"
+            }
+            if (conn.responseCode == 200) {
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                """"server_fingerprint"\s*:\s*"([^"]+)"""".toRegex().find(text)?.groupValues?.get(1)
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun createPairingSession(pin: String? = null, ttlSecs: Long = 300L): String? {
         return try {
             val url = URL("$baseUrl/v1/pair/session")
@@ -231,6 +248,7 @@ fun DesktopMainScreen() {
     var transfers by remember { mutableStateOf<List<DesktopTransferRecord>>(emptyList()) }
     var showPairDialog by remember { mutableStateOf(false) }
     var generatedPin by remember { mutableStateOf("842109") }
+    var serverFingerprint by remember { mutableStateOf<String?>(null) }
 
     val destFolder = remember {
         val appData = System.getenv("APPDATA") ?: System.getProperty("user.home")
@@ -243,8 +261,11 @@ fun DesktopMainScreen() {
             val running = client.isServerRunning()
             isRunning = running
             if (running) {
+                serverFingerprint = client.getServerFingerprint()
                 peers = client.listPeers()
                 transfers = client.listTransfers()
+            } else {
+                serverFingerprint = null
             }
             freeSpaceBytes = destFolder.freeSpace
         }
@@ -280,6 +301,14 @@ fun DesktopMainScreen() {
                             text = if (isRunning) "Listening on 0.0.0.0:35659 (LAN / Hotspot)" else "Receiver Daemon Stopped",
                             fontSize = 13.sp,
                             color = Color(0xFF94A3B8),
+                        )
+                    }
+                    if (serverFingerprint != null) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Server Fingerprint: ${serverFingerprint?.take(16)}...",
+                            fontSize = 11.sp,
+                            color = Color(0xFF64748B),
                         )
                     }
                 }

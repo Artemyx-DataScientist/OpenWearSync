@@ -7,7 +7,7 @@ use openwearsync_protocol::{
     MAX_FILE_BYTES,
 };
 use openwearsync_security::{
-    AuthToken, PairedPeerRegistry, PairingSession, RateLimiter, ReplayFilter,
+    AuthToken, PairedPeer, PairedPeerRegistry, PairingSession, RateLimiter, ReplayFilter,
 };
 use openwearsync_transfer_core::{hash_sha256, TransferReconciliation};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -102,6 +102,17 @@ impl DurableTransferLedger {
                  sha256 BLOB NOT NULL,
                  PRIMARY KEY (transfer_id, offset),
                  FOREIGN KEY (transfer_id) REFERENCES transfers(transfer_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS peers (
+                 device_id TEXT PRIMARY KEY,
+                 device_name TEXT NOT NULL,
+                 shared_secret BLOB NOT NULL,
+                 enrolled_at_epoch_s INTEGER NOT NULL,
+                 revoked INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS server_identity (
+                 key TEXT PRIMARY KEY,
+                 val TEXT NOT NULL
              );"
         ).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("failed to initialize sqlite schema: {}", e))
@@ -371,6 +382,110 @@ impl DurableTransferLedger {
             Err(_) => Vec::new(),
         }
     }
+
+    pub fn save_peer(&self, peer: &PairedPeer) -> ProtocolResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO peers (device_id, device_name, shared_secret, enrolled_at_epoch_s, revoked)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                peer.device_id,
+                peer.device_name,
+                &peer.shared_secret[..],
+                peer.enrolled_at_epoch_s as i64,
+                if peer.revoked { 1 } else { 0 },
+            ],
+        )
+        .map_err(|e| ProtocolError {
+            code: ErrorCode::LimitExceeded,
+            message: format!("sqlite save peer error: {}", e),
+        })?;
+        Ok(())
+    }
+
+    pub fn load_peers(&self) -> ProtocolResult<Vec<PairedPeer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT device_id, device_name, shared_secret, enrolled_at_epoch_s, revoked FROM peers")
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite prepare load_peers error: {}", e),
+            })?;
+
+        let rows = stmt
+            .query_map([], |r| {
+                let device_id: String = r.get(0)?;
+                let device_name: String = r.get(1)?;
+                let secret_blob: Vec<u8> = r.get(2)?;
+                let enrolled: i64 = r.get(3)?;
+                let revoked: i32 = r.get(4)?;
+                Ok((device_id, device_name, secret_blob, enrolled, revoked))
+            })
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite query load_peers error: {}", e),
+            })?;
+
+        let mut peers = Vec::new();
+        for item in rows.flatten() {
+            let mut secret = [0u8; 32];
+            if item.2.len() == 32 {
+                secret.copy_from_slice(&item.2);
+            }
+            peers.push(PairedPeer {
+                device_id: item.0,
+                device_name: item.1,
+                shared_secret: secret,
+                enrolled_at_epoch_s: item.3 as u64,
+                revoked: item.4 != 0,
+            });
+        }
+        Ok(peers)
+    }
+
+    pub fn revoke_peer(&self, device_id: &str) -> ProtocolResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn
+            .execute(
+                "UPDATE peers SET revoked = 1 WHERE device_id = ?1",
+                params![device_id],
+            )
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite revoke peer error: {}", e),
+            })?;
+        Ok(updated > 0)
+    }
+
+    pub fn get_or_create_server_fingerprint(&self) -> String {
+        let conn = self.conn.lock().unwrap();
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT val FROM server_identity WHERE key = 'fingerprint'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+
+        if let Some(fp) = existing {
+            return fp;
+        }
+
+        let random_bytes = openwearsync_security::generate_random_bytes_32();
+        let fp_sha = hash_sha256(&random_bytes);
+        let mut s = String::with_capacity(64);
+        for b in fp_sha {
+            s.push_str(&format!("{:02x}", b));
+        }
+
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('fingerprint', ?1)",
+            params![s],
+        );
+        s
+    }
 }
 
 
@@ -623,6 +738,12 @@ impl ReceiverService {
         registry: Arc<PairedPeerRegistry>,
         max_concurrent_transfers: usize,
     ) -> Self {
+        if let Ok(peers) = store.ledger().load_peers() {
+            for peer in peers {
+                registry.enroll(peer);
+            }
+        }
+
         Self {
             store,
             registry,
@@ -632,6 +753,21 @@ impl ReceiverService {
             active_transfers: Arc::new(Mutex::new(HashSet::new())),
             active_pairing_session: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn enroll_peer(&self, peer: PairedPeer) -> ProtocolResult<()> {
+        let _ = self.store.ledger().save_peer(&peer);
+        self.registry.enroll(peer);
+        Ok(())
+    }
+
+    pub fn revoke_peer(&self, device_id: &str) -> bool {
+        let _ = self.store.ledger().revoke_peer(device_id);
+        self.registry.revoke(device_id)
+    }
+
+    pub fn server_fingerprint(&self) -> String {
+        self.store.ledger().get_or_create_server_fingerprint()
     }
 
     pub fn registry(&self) -> &PairedPeerRegistry {
@@ -778,6 +914,12 @@ impl ReceiverService {
     }
 
     fn handle_reconcile(&self, req: ReconcileRequest) -> ProtocolResult<Response> {
+        if self.store.ledger().get_manifest(&req.transfer_id).is_none() {
+            return Err(ProtocolError {
+                code: ErrorCode::TransferNotFound,
+                message: format!("transfer {} not found in ledger", req.transfer_id),
+            });
+        }
         let received = self.store.ledger().get_chunks(&req.transfer_id);
         Ok(Response::Reconciled(ReconciledResponse {
             transfer_id: req.transfer_id,

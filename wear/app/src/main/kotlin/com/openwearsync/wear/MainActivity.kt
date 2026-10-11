@@ -25,8 +25,8 @@ import kotlin.concurrent.thread
 
 // START_MODULE_CONTRACT
 // PURPOSE: Launchable Wear OS circular UI activity for recording selection, peer pairing, and transfer progress.
-// SCOPE: Android Activity lifecycle, Compose Wear UI presentation, and TransferEngine invocation.
-// DEPENDS: M-WEAR-SHELL, M-ANDROID-PLATFORM, M-TRANSFER-CORE
+// SCOPE: Android Activity lifecycle, Compose Wear UI presentation, credentials persistence, and TransferEngine invocation.
+// DEPENDS: M-WEAR-SHELL, M-ANDROID-PLATFORM, M-TRANSFER-CORE, M-PAIRING-SECURITY, M-ENERGY-POLICY
 // LINKS: M-WEAR-SHELL, M-ANDROID-PLATFORM, V-M-WEAR-SHELL, DF-RECORDING-MANIFEST, DF-ENCRYPTED-CHUNK-UPLOAD
 // END_MODULE_CONTRACT
 
@@ -35,7 +35,7 @@ import kotlin.concurrent.thread
 //   WearSyncNavScreen - enum representing active screen destination.
 //   CircularScreenContainer - round-screen layout container with safe circular padding.
 //   RecordingBrowserScreen - displays stable audio recordings with selection and send actions.
-//   PairingScreen - PIN entry and peer receiver connection setup.
+//   PairingScreen - interactive PIN entry keypad, mDNS discovery, and peer receiver connection setup.
 //   TransferProgressScreen - transfer percentage, byte gauges, pause/resume, and cancel controls.
 // END_MODULE_MAP
 
@@ -89,12 +89,21 @@ fun OpenWearSyncWearApp(
     context: android.content.Context? = null,
     registerPermissionCallback: (((() -> Unit) -> Unit))? = null,
 ) {
+    val credentialsStore = remember { context?.let { PeerCredentialsStore(it) } }
+
     var currentScreen by remember { mutableStateOf(WearSyncNavScreen.BROWSER) }
     var selectedRecording by remember { mutableStateOf<RecordingDescriptor?>(null) }
-    var receiverEndpoint by remember { mutableStateOf(ReceiverEndpoint("192.168.1.100", 35659)) }
-    var pairingPin by remember { mutableStateOf("123456") }
-    var isPaired by remember { mutableStateOf(false) }
-    var pairedSecretHex by remember { mutableStateOf<String?>(null) }
+    var receiverEndpoint by remember {
+        val saved = credentialsStore?.getCredentials()
+        mutableStateOf(
+            if (saved != null) ReceiverEndpoint(saved.receiverHost, saved.receiverPort)
+            else ReceiverEndpoint("192.168.1.100", 35659)
+        )
+    }
+    var pairingPin by remember { mutableStateOf("") }
+    var isPaired by remember { mutableStateOf(credentialsStore?.isPaired() ?: false) }
+    var pairedSecretHex by remember { mutableStateOf(credentialsStore?.getCredentials()?.sharedSecretHex) }
+    var pinnedFingerprint by remember { mutableStateOf(credentialsStore?.getCredentials()?.serverFingerprint) }
     var pairingErrorMessage by remember { mutableStateOf<String?>(null) }
     var transferProgress by remember { mutableStateOf(TransferProgress()) }
 
@@ -131,16 +140,29 @@ fun OpenWearSyncWearApp(
                     onSelect = { selectedRecording = it },
                     onRefresh = { refreshRecordings() },
                     onSend = { rec ->
+                        if (context != null) {
+                            val (safe, reason) = TransferForegroundService.isSafeForTransfer(context)
+                            if (!safe) {
+                                scanBlockedMessage = reason
+                                return@RecordingBrowserScreen
+                            }
+                            TransferForegroundService.start(context)
+                        }
+
                         selectedRecording = rec
                         currentScreen = WearSyncNavScreen.TRANSFER
                         thread {
-                            transferEngine.transferRecording(
+                            val success = transferEngine.transferRecording(
                                 endpoint = receiverEndpoint,
                                 descriptor = rec,
                                 deviceId = "galaxy-watch-wearos",
                                 sharedSecretHex = pairedSecretHex,
+                                pinnedFingerprint = pinnedFingerprint,
                                 onProgress = { progress -> transferProgress = progress },
                             )
+                            if (context != null) {
+                                TransferForegroundService.stop(context)
+                            }
                         }
                     },
                     onOpenPairing = { currentScreen = WearSyncNavScreen.PAIRING },
@@ -151,6 +173,7 @@ fun OpenWearSyncWearApp(
                     endpoint = receiverEndpoint,
                     pin = pairingPin,
                     isPaired = isPaired,
+                    pinnedFingerprint = pinnedFingerprint,
                     errorMessage = pairingErrorMessage,
                     onPinChange = { pairingPin = it },
                     onEndpointChange = { receiverEndpoint = it },
@@ -159,15 +182,83 @@ fun OpenWearSyncWearApp(
                             val res = transferEngine.pair(
                                 endpoint = receiverEndpoint,
                                 deviceId = "galaxy-watch-wearos",
-                                deviceName = "Galaxy Watch",
+                                deviceName = "Galaxy Watch Ultra",
                                 pin = pairingPin,
                             )
-                            isPaired = res.success
-                            if (res.success) {
+                            if (res.success && res.sharedSecretHex != null) {
+                                isPaired = true
                                 pairedSecretHex = res.sharedSecretHex
+                                pinnedFingerprint = res.serverFingerprint
                                 pairingErrorMessage = null
+                                credentialsStore?.savePairing(
+                                    deviceId = "galaxy-watch-wearos",
+                                    sharedSecretHex = res.sharedSecretHex,
+                                    serverFingerprint = res.serverFingerprint ?: "",
+                                    host = receiverEndpoint.host,
+                                    port = receiverEndpoint.port,
+                                )
                             } else {
+                                isPaired = false
                                 pairingErrorMessage = res.error ?: "Pairing failed"
+                            }
+                        }
+                    },
+                    onUnpair = {
+                        credentialsStore?.clearPairing()
+                        isPaired = false
+                        pairedSecretHex = null
+                        pinnedFingerprint = null
+                        pairingPin = ""
+                        pairingErrorMessage = null
+                    },
+                    onDiscover = {
+                        if (context != null) {
+                            thread {
+                                try {
+                                    val driver = AndroidNsdDiscoveryDriver(context)
+                                    val verifier = object : EndpointVerifier {
+                                        override fun verify(endpoint: ReceiverEndpoint): Boolean {
+                                            return try {
+                                                val sock = java.net.Socket()
+                                                sock.connect(java.net.InetSocketAddress(endpoint.host, endpoint.port), 2000)
+                                                sock.close()
+                                                true
+                                            } catch (_: Exception) {
+                                                false
+                                            }
+                                        }
+                                    }
+                                    val scheduler = object : TimeoutScheduler {
+                                        override fun schedule(delayMillis: Long, task: () -> Unit): java.io.Closeable {
+                                            val timer = java.util.Timer()
+                                            timer.schedule(object : java.util.TimerTask() {
+                                                override fun run() { task() }
+                                            }, delayMillis)
+                                            return java.io.Closeable { timer.cancel() }
+                                        }
+                                    }
+
+                                    val discovery = BoundedPeerDiscovery(driver, verifier, scheduler, timeoutMillis = 4000L)
+                                    discovery.start(receiverEndpoint) { result ->
+                                        when (result) {
+                                            is DiscoveryResult.Found -> {
+                                                receiverEndpoint = result.endpoint
+                                                pairingErrorMessage = "Found ${result.endpoint.host}:${result.endpoint.port}"
+                                            }
+                                            is DiscoveryResult.ClientIsolation -> {
+                                                pairingErrorMessage = "Wi-Fi client isolation blocked receiver"
+                                            }
+                                            is DiscoveryResult.TimedOut -> {
+                                                pairingErrorMessage = "Receiver discovery timed out"
+                                            }
+                                            is DiscoveryResult.Failed -> {
+                                                pairingErrorMessage = "Discovery failed: ${result.diagnostic}"
+                                            }
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    pairingErrorMessage = "Discovery: ${e.message}"
+                                }
                             }
                         }
                     },
@@ -182,8 +273,14 @@ fun OpenWearSyncWearApp(
                     },
                     onCancel = {
                         transferEngine.cancel()
+                        if (context != null) {
+                            TransferForegroundService.stop(context)
+                        }
                     },
                     onDone = {
+                        if (context != null) {
+                            TransferForegroundService.stop(context)
+                        }
                         currentScreen = WearSyncNavScreen.BROWSER
                         refreshRecordings()
                     },
@@ -199,7 +296,7 @@ fun CircularScreenContainer(content: @Composable BoxScope.() -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0F172A))
-            .padding(12.dp),
+            .padding(8.dp),
         contentAlignment = Alignment.Center,
         content = content,
     )
@@ -219,28 +316,32 @@ fun RecordingBrowserScreen(
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(
-            text = "OpenWearSync",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF38BDF8),
-        )
-        Text(
-            text = if (isPaired) "● Paired" else "○ Not Paired",
-            fontSize = 10.sp,
-            color = if (isPaired) Color(0xFF4ADE80) else Color(0xFFF87171),
-        )
-
-        Spacer(modifier = Modifier.height(4.dp))
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(top = 4.dp),
+        ) {
+            Text(
+                text = "OpenWearSync",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF38BDF8),
+            )
+            Text(
+                text = if (isPaired) "● Paired with PC" else "○ Not Paired",
+                fontSize = 9.sp,
+                color = if (isPaired) Color(0xFF4ADE80) else Color(0xFFF87171),
+            )
+        }
 
         if (blockedMessage != null) {
             Text(
                 text = blockedMessage,
-                fontSize = 11.sp,
-                color = Color(0xFF94A3B8),
+                fontSize = 10.sp,
+                color = Color(0xFFFBBF24),
                 textAlign = TextAlign.Center,
-                modifier = Modifier.weight(1f).padding(8.dp),
+                modifier = Modifier.padding(horizontal = 8.dp),
             )
         } else {
             LazyColumn(
@@ -280,13 +381,13 @@ fun RecordingBrowserScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
             horizontalArrangement = Arrangement.Center,
         ) {
-            if (selected != null) {
+            if (selected != null && isPaired) {
                 Button(
                     onClick = { onSend(selected) },
                     shape = CircleShape,
@@ -323,60 +424,148 @@ fun PairingScreen(
     endpoint: ReceiverEndpoint,
     pin: String,
     isPaired: Boolean,
+    pinnedFingerprint: String? = null,
     errorMessage: String? = null,
     onPinChange: (String) -> Unit,
     onEndpointChange: (ReceiverEndpoint) -> Unit,
     onPair: () -> Unit,
+    onUnpair: () -> Unit,
+    onDiscover: () -> Unit,
     onBack: () -> Unit,
 ) {
-    Column(
+    LazyColumn(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("Pair PC Receiver", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
-        Spacer(modifier = Modifier.height(2.dp))
-        Text("${endpoint.host}:${endpoint.port}", fontSize = 10.sp, color = Color(0xFF94A3B8))
-        Spacer(modifier = Modifier.height(4.dp))
-
-        Text("6-Digit Receiver PIN:", fontSize = 10.sp, color = Color.White)
-        Text(
-            text = pin,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFFFBBF24),
-            modifier = Modifier.padding(vertical = 2.dp),
-        )
-
-        if (errorMessage != null) {
-            Text(
-                text = errorMessage,
-                fontSize = 9.sp,
-                color = Color(0xFFEF4444),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 8.dp),
-            )
+        item {
+            Text("Pair PC Receiver", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
+            Spacer(modifier = Modifier.height(2.dp))
+            Text("${endpoint.host}:${endpoint.port}", fontSize = 9.sp, color = Color(0xFF94A3B8))
             Spacer(modifier = Modifier.height(2.dp))
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
-        Row {
-            Button(
-                onClick = onPair,
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-            ) {
-                Text(if (isPaired) "Paired!" else "Connect", fontSize = 11.sp)
+        if (isPaired) {
+            item {
+                Text("● Status: Paired", fontSize = 11.sp, color = Color(0xFF4ADE80), fontWeight = FontWeight.SemiBold)
+                if (!pinnedFingerprint.isNullOrEmpty()) {
+                    Text(
+                        text = "ID: ${pinnedFingerprint.take(12)}...",
+                        fontSize = 8.sp,
+                        color = Color(0xFF94A3B8),
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Row {
+                    Button(
+                        onClick = onUnpair,
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    ) {
+                        Text("Unpair", fontSize = 10.sp)
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Button(
+                        onClick = onBack,
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    ) {
+                        Text("Back", fontSize = 10.sp)
+                    }
+                }
             }
-            Spacer(modifier = Modifier.width(6.dp))
-            Button(
-                onClick = onBack,
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-            ) {
-                Text("Back", fontSize = 11.sp)
+        } else {
+            // Interactive 6-digit PIN Keypad
+            item {
+                Text("Enter PC PIN:", fontSize = 9.sp, color = Color.White)
+                val displayPin = pin.padEnd(6, '·')
+                Text(
+                    text = displayPin.map { "$it " }.joinToString(""),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFFBBF24),
+                    modifier = Modifier.padding(vertical = 2.dp),
+                )
+            }
+
+            // Keypad rows
+            val keypad = listOf(
+                listOf("1", "2", "3"),
+                listOf("4", "5", "6"),
+                listOf("7", "8", "9"),
+                listOf("C", "0", "⌫"),
+            )
+
+            items(keypad) { row ->
+                Row(
+                    modifier = Modifier.padding(vertical = 1.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    row.forEach { digit ->
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp, 24.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF334155))
+                                .clickable {
+                                    when (digit) {
+                                        "⌫" -> if (pin.isNotEmpty()) onPinChange(pin.dropLast(1))
+                                        "C" -> onPinChange("")
+                                        else -> if (pin.length < 6) onPinChange(pin + digit)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(digit, fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            if (errorMessage != null) {
+                item {
+                    Text(
+                        text = errorMessage,
+                        fontSize = 8.sp,
+                        color = Color(0xFFEF4444),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Button(
+                        onClick = onDiscover,
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("Find PC", fontSize = 9.sp)
+                    }
+                    Button(
+                        onClick = onPair,
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        enabled = pin.length == 6,
+                    ) {
+                        Text("Connect", fontSize = 9.sp)
+                    }
+                    Button(
+                        onClick = onBack,
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("Back", fontSize = 9.sp)
+                    }
+                }
             }
         }
     }
@@ -403,13 +592,13 @@ fun TransferProgressScreen(
             overflow = TextOverflow.Ellipsis,
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Box(contentAlignment = Alignment.Center) {
             CircularProgressIndicator(
                 progress = { progress.percent / 100f },
-                modifier = Modifier.size(76.dp),
-                strokeWidth = 6.dp,
+                modifier = Modifier.size(72.dp),
+                strokeWidth = 5.dp,
             )
             Text(
                 text = "${progress.percent}%",
@@ -419,27 +608,28 @@ fun TransferProgressScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         val kbTransferred = progress.transferredBytes / 1024
         val kbTotal = progress.totalBytes / 1024
         Text(
             text = "$kbTransferred / $kbTotal KB",
-            fontSize = 10.sp,
+            fontSize = 9.sp,
             color = Color(0xFF94A3B8),
         )
 
         Text(
             text = when (progress.status) {
-                TransferStatus.TRANSFERRING -> "Sending chunks..."
+                TransferStatus.TRANSFERRING -> "Streaming chunks..."
+                TransferStatus.RECONCILING -> "Reconciling..."
+                TransferStatus.CONNECTING -> "Connecting..."
                 TransferStatus.PAUSED -> "Paused"
                 TransferStatus.COMPLETED -> "Done!"
                 TransferStatus.FAILED -> progress.errorMessage ?: "Failed"
                 TransferStatus.CANCELLED -> "Cancelled"
-                TransferStatus.CONNECTING -> "Connecting..."
                 else -> ""
             },
-            fontSize = 10.sp,
+            fontSize = 9.sp,
             color = when (progress.status) {
                 TransferStatus.COMPLETED -> Color(0xFF4ADE80)
                 TransferStatus.FAILED -> Color(0xFFEF4444)
@@ -449,7 +639,7 @@ fun TransferProgressScreen(
             overflow = TextOverflow.Ellipsis,
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Row {
             if (progress.status == TransferStatus.TRANSFERRING || progress.status == TransferStatus.PAUSED) {

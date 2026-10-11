@@ -129,13 +129,6 @@ impl HttpServer {
         Ok(())
     }
 }
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
-}
 
 /// Helper parsing hex bytes
 fn parse_hex_32(s: &str) -> Option<[u8; 32]> {
@@ -215,6 +208,7 @@ fn send_error(stream: TcpStream, error: ProtocolError) {
 }
 
 fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::Result<()> {
+    let is_loopback = stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
 
@@ -274,7 +268,14 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         };
         match service.handle_request(Request::Status(req), None) {
             Ok(resp) => {
-                let json = serde_json::to_vec(&resp).unwrap();
+                let mut val = serde_json::to_value(&resp).unwrap_or_default();
+                if let serde_json::Value::Object(ref mut map) = val {
+                    map.insert(
+                        "server_fingerprint".to_string(),
+                        serde_json::Value::String(service.server_fingerprint()),
+                    );
+                }
+                let json = serde_json::to_vec(&val).unwrap();
                 send_response(stream, 200, "OK", &json, "application/json");
             }
             Err(e) => send_error(stream, e),
@@ -283,6 +284,17 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
     }
 
     if method == "POST" && path == "/v1/pair/session" {
+        if !is_loopback {
+            send_response(
+                stream,
+                403,
+                "Forbidden",
+                b"{\"error\":\"pairing session can only be initiated from localhost\"}",
+                "application/json",
+            );
+            return Ok(());
+        }
+
         #[derive(serde::Deserialize)]
         struct CreateSessionReq {
             pin: Option<String>,
@@ -324,7 +336,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         struct PairResp {
             status: String,
             device_id: String,
-            shared_secret_hex: String,
+            server_fingerprint: String,
         }
 
         let pair_req: PairReq = match serde_json::from_slice(&body) {
@@ -379,7 +391,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             .unwrap_or_default()
             .as_secs();
 
-        service.registry().enroll(openwearsync_security::PairedPeer {
+        let _ = service.enroll_peer(openwearsync_security::PairedPeer {
             device_id: pair_req.device_id.clone(),
             device_name: pair_req.device_name,
             shared_secret: secret,
@@ -391,7 +403,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         let resp = PairResp {
             status: "paired".to_string(),
             device_id: pair_req.device_id,
-            shared_secret_hex: hex_encode(&secret),
+            server_fingerprint: service.server_fingerprint(),
         };
         let json = serde_json::to_vec(&resp).unwrap();
         send_response(stream, 200, "OK", &json, "application/json");
@@ -424,8 +436,18 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
     }
 
     if method == "DELETE" && path.starts_with("/v1/peers/") {
+        if !is_loopback {
+            send_response(
+                stream,
+                403,
+                "Forbidden",
+                b"{\"error\":\"peer revocation can only be performed from localhost\"}",
+                "application/json",
+            );
+            return Ok(());
+        }
         let device_id = &path["/v1/peers/".len()..];
-        let revoked = service.registry().revoke(device_id);
+        let revoked = service.revoke_peer(device_id);
         let resp = serde_json::json!({ "device_id": device_id, "revoked": revoked });
         let json = serde_json::to_vec(&resp).unwrap();
         send_response(stream, 200, "OK", &json, "application/json");

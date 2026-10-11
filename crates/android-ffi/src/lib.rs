@@ -1,8 +1,11 @@
 //! Android ARM64 Rust JNI bridge and safe lifecycle/cancellation interface.
 
 use openwearsync_protocol::{ErrorCode, ProtocolError};
-use openwearsync_transfer_core::CancellationToken;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use openwearsync_transfer_core::{CancellationToken, TransferReconciliation};
+use std::sync::{
+    atomic::{AtomicI32, AtomicU64, Ordering},
+    Mutex,
+};
 
 // START_MODULE_CONTRACT
 // PURPOSE: Android ARM64 Rust JNI bridge and safe lifecycle/cancellation interface.
@@ -61,6 +64,7 @@ pub struct NativeSessionHandle {
     pub transferred_bytes: AtomicU64,
     pub total_bytes: AtomicU64,
     pub last_error_code: AtomicI32,
+    pub reconciliation: Mutex<TransferReconciliation>,
 }
 
 impl NativeSessionHandle {
@@ -71,6 +75,7 @@ impl NativeSessionHandle {
             transferred_bytes: AtomicU64::new(0),
             total_bytes: AtomicU64::new(total_bytes),
             last_error_code: AtomicI32::new(ERROR_OK),
+            reconciliation: Mutex::new(TransferReconciliation::new(total_bytes)),
         }
     }
 
@@ -79,8 +84,30 @@ impl NativeSessionHandle {
         self.status.store(SessionStatus::Cancelled as i32, Ordering::SeqCst);
     }
 
+    pub fn pause(&self) {
+        self.status.store(SessionStatus::Idle as i32, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.status.store(SessionStatus::Active as i32, Ordering::SeqCst);
+    }
+
     pub fn set_progress(&self, transferred: u64) {
         self.transferred_bytes.store(transferred, Ordering::SeqCst);
+    }
+
+    pub fn record_chunk(&self, offset: u64, length: u32) {
+        let mut rec = self.reconciliation.lock().unwrap();
+        rec.record_chunk(offset, length);
+        self.transferred_bytes.store(rec.received_bytes(), Ordering::SeqCst);
+        if rec.is_complete() {
+            self.status.store(SessionStatus::Completed as i32, Ordering::SeqCst);
+        }
+    }
+
+    pub fn is_chunk_received(&self, offset: u64, length: u32) -> bool {
+        let rec = self.reconciliation.lock().unwrap();
+        rec.is_chunk_received(offset, length)
     }
 
     pub fn mark_completed(&self) {
@@ -122,6 +149,28 @@ pub extern "C" fn native_cancel_session(handle: *mut NativeSessionHandle) -> i32
     ERROR_OK
 }
 
+#[no_mangle]
+pub extern "C" fn native_pause_session(handle: *mut NativeSessionHandle) -> i32 {
+    if handle.is_null() {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    unsafe {
+        (*handle).pause();
+    }
+    ERROR_OK
+}
+
+#[no_mangle]
+pub extern "C" fn native_resume_session(handle: *mut NativeSessionHandle) -> i32 {
+    if handle.is_null() {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    unsafe {
+        (*handle).resume();
+    }
+    ERROR_OK
+}
+
 // START_CONTRACT: native_get_status
 // PURPOSE: Query the current lifecycle status of a session handle.
 // INPUTS: { handle: *const NativeSessionHandle }
@@ -150,6 +199,37 @@ pub extern "C" fn native_get_progress(handle: *const NativeSessionHandle) -> u64
     unsafe { (*handle).transferred_bytes.load(Ordering::SeqCst) }
 }
 
+#[no_mangle]
+pub extern "C" fn native_record_chunk(
+    handle: *mut NativeSessionHandle,
+    offset: u64,
+    length: u32,
+) -> i32 {
+    if handle.is_null() {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    unsafe {
+        (*handle).record_chunk(offset, length);
+    }
+    ERROR_OK
+}
+
+#[no_mangle]
+pub extern "C" fn native_is_chunk_received(
+    handle: *const NativeSessionHandle,
+    offset: u64,
+    length: u32,
+) -> i32 {
+    if handle.is_null() {
+        return 0;
+    }
+    if unsafe { (*handle).is_chunk_received(offset, length) } {
+        1
+    } else {
+        0
+    }
+}
+
 // START_CONTRACT: native_destroy_session
 // PURPOSE: Free the heap-allocated session handle.
 // INPUTS: { handle: *mut NativeSessionHandle }
@@ -165,6 +245,130 @@ pub extern "C" fn native_destroy_session(handle: *mut NativeSessionHandle) -> i3
         drop(Box::from_raw(handle));
     }
     ERROR_OK
+}
+
+// Crypto & security helpers
+#[no_mangle]
+pub extern "C" fn native_compute_sha256(
+    data_ptr: *const u8,
+    data_len: usize,
+    out_sha_ptr: *mut u8,
+) -> i32 {
+    if data_ptr.is_null() || out_sha_ptr.is_null() {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+    let hash = openwearsync_transfer_core::hash_sha256(data);
+    unsafe {
+        std::ptr::copy_nonoverlapping(hash.as_ptr(), out_sha_ptr, 32);
+    }
+    ERROR_OK
+}
+
+#[no_mangle]
+pub extern "C" fn native_derive_secret(
+    pin_ptr: *const u8,
+    pin_len: usize,
+    device_id_ptr: *const u8,
+    device_id_len: usize,
+    out_secret_ptr: *mut u8,
+) -> i32 {
+    if pin_ptr.is_null() || device_id_ptr.is_null() || out_secret_ptr.is_null() {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let pin = unsafe { std::slice::from_raw_parts(pin_ptr, pin_len) };
+    let device_id = unsafe { std::slice::from_raw_parts(device_id_ptr, device_id_len) };
+    let secret = openwearsync_security::hmac_sha256(pin, device_id);
+    unsafe {
+        std::ptr::copy_nonoverlapping(secret.as_ptr(), out_secret_ptr, 32);
+    }
+    ERROR_OK
+}
+
+// JNI bindings for com.openwearsync.wear.NativeTransferBridge
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeCreateSession(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    total_bytes: i64,
+) -> i64 {
+    native_create_session(total_bytes as u64) as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeCancelSession(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    native_cancel_session(handle as *mut NativeSessionHandle)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativePauseSession(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    native_pause_session(handle as *mut NativeSessionHandle)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeResumeSession(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    native_resume_session(handle as *mut NativeSessionHandle)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeGetStatus(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    native_get_status(handle as *const NativeSessionHandle)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeGetProgress(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+) -> i64 {
+    native_get_progress(handle as *const NativeSessionHandle) as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeRecordChunk(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+    offset: i64,
+    length: i32,
+) -> i32 {
+    native_record_chunk(handle as *mut NativeSessionHandle, offset as u64, length as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeIsChunkReceived(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+    offset: i64,
+    length: i32,
+) -> i32 {
+    native_is_chunk_received(handle as *const NativeSessionHandle, offset as u64, length as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeDestroySession(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    native_destroy_session(handle as *mut NativeSessionHandle)
 }
 
 #[cfg(test)]
@@ -211,5 +415,40 @@ mod tests {
             message: "stop".to_string(),
         };
         assert_eq!(map_error_to_code(&err_cancel), ERROR_CANCELLED);
+    }
+
+    #[test]
+    fn reconciliation_and_crypto_operations_work_via_ffi() {
+        let handle = native_create_session(100_000);
+        assert_eq!(native_is_chunk_received(handle, 0, 50_000), 0);
+
+        assert_eq!(native_record_chunk(handle, 0, 50_000), ERROR_OK);
+        assert_eq!(native_is_chunk_received(handle, 0, 50_000), 1);
+        assert_eq!(native_get_progress(handle), 50_000);
+        assert_eq!(native_get_status(handle), SessionStatus::Active as i32);
+
+        assert_eq!(native_pause_session(handle), ERROR_OK);
+        assert_eq!(native_get_status(handle), SessionStatus::Idle as i32);
+        assert_eq!(native_resume_session(handle), ERROR_OK);
+        assert_eq!(native_get_status(handle), SessionStatus::Active as i32);
+
+        assert_eq!(native_record_chunk(handle, 50_000, 50_000), ERROR_OK);
+        assert_eq!(native_get_progress(handle), 100_000);
+        assert_eq!(native_get_status(handle), SessionStatus::Completed as i32);
+
+        // Test native SHA-256
+        let data = b"hello openwearsync";
+        let mut sha = [0u8; 32];
+        assert_eq!(native_compute_sha256(data.as_ptr(), data.len(), sha.as_mut_ptr()), ERROR_OK);
+        assert_eq!(sha, openwearsync_transfer_core::hash_sha256(data));
+
+        // Test native secret derivation
+        let pin = b"123456";
+        let dev = b"watch-1";
+        let mut secret = [0u8; 32];
+        assert_eq!(native_derive_secret(pin.as_ptr(), pin.len(), dev.as_ptr(), dev.len(), secret.as_mut_ptr()), ERROR_OK);
+        assert_eq!(secret, openwearsync_security::hmac_sha256(pin, dev));
+
+        assert_eq!(native_destroy_session(handle), ERROR_OK);
     }
 }

@@ -30,13 +30,6 @@ fn to_hex_str(bytes: &[u8]) -> String {
     s
 }
 
-fn hex_to_32(s: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
-    }
-    out
-}
 
 fn send_raw_http(
     addr: SocketAddr,
@@ -135,10 +128,25 @@ fn end_to_end_real_http_socket_transfer() {
     let resp_str = String::from_utf8_lossy(&resp);
     assert!(resp_str.contains("paired"));
 
-    // Extract shared secret from pairing response
+    // Verify server_fingerprint is present and shared_secret_hex is NOT leaked
     let json_val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
-    let secret_hex = json_val["shared_secret_hex"].as_str().unwrap();
-    let shared_secret = hex_to_32(secret_hex);
+    assert!(json_val.get("server_fingerprint").is_some());
+    assert!(json_val.get("shared_secret_hex").is_none(), "Server must NOT leak shared secret over the wire!");
+
+    // Client derives shared secret locally from PIN and device ID
+    let shared_secret = openwearsync_security::hmac_sha256(b"741258", b"watch-http-test");
+
+    // 4b. Test reconcile on non-existent transfer -> must return 404 TransferNotFound!
+    let non_existent_token = AuthToken::create("watch-http-test", &shared_secret);
+    let non_existent_auth = format!("Bearer {}", serde_json::to_string(&non_existent_token).unwrap());
+    let (reconcile_404_status, _) = send_raw_http(
+        addr,
+        "POST",
+        "/v1/transfers/tx-does-not-exist/reconcile",
+        &[("Authorization", &non_existent_auth)],
+        b"{}",
+    );
+    assert_eq!(reconcile_404_status, 404, "Reconciling non-existent transfer must return 404!");
 
     // 5. Verify /v1/peers DOES NOT expose shared_secret
     let (status, peers_resp) = send_raw_http(addr, "GET", "/v1/peers", &[], b"");
