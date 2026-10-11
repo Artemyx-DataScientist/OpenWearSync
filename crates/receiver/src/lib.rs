@@ -8,6 +8,7 @@ use openwearsync_protocol::{
 };
 use openwearsync_security::{
     AuthToken, PairedPeer, PairedPeerRegistry, PairingSession, RateLimiter, ReplayFilter,
+    ServerIdentity,
 };
 use openwearsync_transfer_core::{hash_sha256, TransferReconciliation};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -457,11 +458,11 @@ impl DurableTransferLedger {
         Ok(updated > 0)
     }
 
-    pub fn get_or_create_server_fingerprint(&self) -> String {
+    pub fn get_or_create_server_identity(&self) -> ServerIdentity {
         let conn = self.conn.lock().unwrap();
-        let existing: Option<String> = conn
+        let existing: Option<Vec<u8>> = conn
             .query_row(
-                "SELECT val FROM server_identity WHERE key = 'fingerprint'",
+                "SELECT val FROM server_identity WHERE key = 'private_key'",
                 [],
                 |r| r.get(0),
             )
@@ -469,22 +470,32 @@ impl DurableTransferLedger {
             .ok()
             .flatten();
 
-        if let Some(fp) = existing {
-            return fp;
+        if let Some(priv_bytes) = existing {
+            if priv_bytes.len() == 32 {
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(&priv_bytes);
+                return ServerIdentity::from_private_key(pk);
+            }
         }
 
-        let random_bytes = openwearsync_security::generate_random_bytes_32();
-        let fp_sha = hash_sha256(&random_bytes);
-        let mut s = String::with_capacity(64);
-        for b in fp_sha {
-            s.push_str(&format!("{:02x}", b));
-        }
-
+        let identity = ServerIdentity::generate();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('private_key', ?1)",
+            params![&identity.private_key[..]],
+        );
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('public_key', ?1)",
+            params![&identity.public_key[..]],
+        );
         let _ = conn.execute(
             "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('fingerprint', ?1)",
-            params![s],
+            params![identity.fingerprint.as_bytes()],
         );
-        s
+        identity
+    }
+
+    pub fn get_or_create_server_fingerprint(&self) -> String {
+        self.get_or_create_server_identity().fingerprint
     }
 }
 
@@ -756,7 +767,7 @@ impl ReceiverService {
     }
 
     pub fn enroll_peer(&self, peer: PairedPeer) -> ProtocolResult<()> {
-        let _ = self.store.ledger().save_peer(&peer);
+        self.store.ledger().save_peer(&peer)?;
         self.registry.enroll(peer);
         Ok(())
     }
@@ -764,6 +775,10 @@ impl ReceiverService {
     pub fn revoke_peer(&self, device_id: &str) -> bool {
         let _ = self.store.ledger().revoke_peer(device_id);
         self.registry.revoke(device_id)
+    }
+
+    pub fn server_identity(&self) -> ServerIdentity {
+        self.store.ledger().get_or_create_server_identity()
     }
 
     pub fn server_fingerprint(&self) -> String {

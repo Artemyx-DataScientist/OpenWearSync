@@ -105,7 +105,10 @@ fun OpenWearSyncWearApp(
     var pairedSecretHex by remember { mutableStateOf(credentialsStore?.getCredentials()?.sharedSecretHex) }
     var pinnedFingerprint by remember { mutableStateOf(credentialsStore?.getCredentials()?.serverFingerprint) }
     var pairingErrorMessage by remember { mutableStateOf<String?>(null) }
-    var transferProgress by remember { mutableStateOf(TransferProgress()) }
+    val serviceProgress by TransferForegroundService.progressFlow.collectAsState()
+    val isServiceTransferring by TransferForegroundService.isTransferring.collectAsState()
+    var localTransferProgress by remember { mutableStateOf(TransferProgress()) }
+    val transferProgress = if (isServiceTransferring || serviceProgress.status != TransferStatus.IDLE) serviceProgress else localTransferProgress
 
     var recordings by remember { mutableStateOf<List<RecordingDescriptor>>(emptyList()) }
     var scanBlockedMessage by remember { mutableStateOf<String?>(null) }
@@ -146,22 +149,28 @@ fun OpenWearSyncWearApp(
                                 scanBlockedMessage = reason
                                 return@RecordingBrowserScreen
                             }
-                            TransferForegroundService.start(context)
-                        }
-
-                        selectedRecording = rec
-                        currentScreen = WearSyncNavScreen.TRANSFER
-                        thread {
-                            val success = transferEngine.transferRecording(
+                            selectedRecording = rec
+                            currentScreen = WearSyncNavScreen.TRANSFER
+                            TransferForegroundService.startTransfer(
+                                context = context,
                                 endpoint = receiverEndpoint,
                                 descriptor = rec,
                                 deviceId = "galaxy-watch-wearos",
                                 sharedSecretHex = pairedSecretHex,
-                                pinnedFingerprint = pinnedFingerprint,
-                                onProgress = { progress -> transferProgress = progress },
+                                serverFingerprint = pinnedFingerprint,
                             )
-                            if (context != null) {
-                                TransferForegroundService.stop(context)
+                        } else {
+                            selectedRecording = rec
+                            currentScreen = WearSyncNavScreen.TRANSFER
+                            thread {
+                                transferEngine.transferRecording(
+                                    endpoint = receiverEndpoint,
+                                    descriptor = rec,
+                                    deviceId = "galaxy-watch-wearos",
+                                    sharedSecretHex = pairedSecretHex,
+                                    pinnedFingerprint = pinnedFingerprint,
+                                    onProgress = { progress -> localTransferProgress = progress },
+                                )
                             }
                         }
                     },
@@ -184,6 +193,7 @@ fun OpenWearSyncWearApp(
                                 deviceId = "galaxy-watch-wearos",
                                 deviceName = "Galaxy Watch Ultra",
                                 pin = pairingPin,
+                                pinnedFingerprint = pinnedFingerprint,
                             )
                             if (res.success && res.sharedSecretHex != null) {
                                 isPaired = true
@@ -269,9 +279,14 @@ fun OpenWearSyncWearApp(
                 TransferProgressScreen(
                     progress = transferProgress,
                     onPauseToggle = {
-                        if (transferEngine.isPaused()) transferEngine.resume() else transferEngine.pause()
+                        TransferForegroundService.activeEngine?.let {
+                            if (it.isPaused()) it.resume() else it.pause()
+                        } ?: run {
+                            if (transferEngine.isPaused()) transferEngine.resume() else transferEngine.pause()
+                        }
                     },
                     onCancel = {
+                        TransferForegroundService.cancel()
                         transferEngine.cancel()
                         if (context != null) {
                             TransferForegroundService.stop(context)

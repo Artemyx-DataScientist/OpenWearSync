@@ -325,6 +325,169 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         return Ok(());
     }
 
+    if method == "POST" && path == "/v1/pair/initiate" {
+        #[allow(dead_code)]
+        #[derive(serde::Deserialize)]
+        struct InitiateReq {
+            device_id: String,
+            #[serde(default)]
+            client_nonce_hex: String,
+        }
+        #[derive(serde::Serialize)]
+        struct InitiateResp {
+            session_id: String,
+            server_nonce_hex: String,
+            salt_hex: String,
+            server_public_key_hex: String,
+            server_fingerprint: String,
+        }
+
+        let init_req: InitiateReq = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                send_response(stream, 400, "Bad Request", format!("invalid json: {}", e).as_bytes(), "text/plain");
+                return Ok(());
+            }
+        };
+
+        if let Err(e) = service.limiter().check_allowed(&init_req.device_id) {
+            send_error(stream, e);
+            return Ok(());
+        }
+
+        let active_session = match service.get_active_pairing_session() {
+            Some(s) if !s.is_expired() => s,
+            _ => {
+                send_response(
+                    stream,
+                    403,
+                    "Forbidden",
+                    b"{\"error\":\"no active pairing session; initiate pairing on Windows first\"}",
+                    "application/json",
+                );
+                return Ok(());
+            }
+        };
+
+        let identity = service.server_identity();
+        let resp = InitiateResp {
+            session_id: active_session.session_id,
+            server_nonce_hex: openwearsync_security::bytes_to_hex(&active_session.server_nonce),
+            salt_hex: openwearsync_security::bytes_to_hex(&active_session.salt),
+            server_public_key_hex: openwearsync_security::bytes_to_hex(&identity.public_key),
+            server_fingerprint: identity.fingerprint,
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        send_response(stream, 200, "OK", &json, "application/json");
+        return Ok(());
+    }
+
+    if method == "POST" && path == "/v1/pair/confirm" {
+        #[derive(serde::Deserialize)]
+        struct ConfirmReq {
+            session_id: String,
+            device_id: String,
+            device_name: String,
+            client_nonce_hex: String,
+            client_proof_hex: String,
+        }
+        #[derive(serde::Serialize)]
+        struct ConfirmResp {
+            status: String,
+            device_id: String,
+            server_proof_hex: String,
+            server_fingerprint: String,
+        }
+
+        let confirm_req: ConfirmReq = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                send_response(stream, 400, "Bad Request", format!("invalid json: {}", e).as_bytes(), "text/plain");
+                return Ok(());
+            }
+        };
+
+        if let Err(e) = service.limiter().check_allowed(&confirm_req.device_id) {
+            send_error(stream, e);
+            return Ok(());
+        }
+
+        let active_session = match service.get_active_pairing_session() {
+            Some(s) if s.session_id == confirm_req.session_id && !s.is_expired() => s,
+            _ => {
+                send_response(
+                    stream,
+                    403,
+                    "Forbidden",
+                    b"{\"error\":\"invalid or expired pairing session\"}",
+                    "application/json",
+                );
+                return Ok(());
+            }
+        };
+
+        let client_nonce = match openwearsync_security::hex_to_32(&confirm_req.client_nonce_hex) {
+            Some(n) => n,
+            None => {
+                send_response(stream, 400, "Bad Request", b"invalid client_nonce_hex", "text/plain");
+                return Ok(());
+            }
+        };
+
+        let client_proof = match openwearsync_security::hex_to_32(&confirm_req.client_proof_hex) {
+            Some(p) => p,
+            None => {
+                send_response(stream, 400, "Bad Request", b"invalid client_proof_hex", "text/plain");
+                return Ok(());
+            }
+        };
+
+        let identity = service.server_identity();
+        let pake_keys = openwearsync_security::derive_pake_keys(
+            &active_session.pin,
+            &active_session.salt,
+            &active_session.server_nonce,
+            &client_nonce,
+            &confirm_req.device_id,
+            &identity.fingerprint,
+        );
+
+        if !openwearsync_security::constant_time_eq_32(&client_proof, &pake_keys.client_proof) {
+            let _ = service.limiter().record_failure(&confirm_req.device_id);
+            send_response(stream, 401, "Unauthorized", b"{\"error\":\"invalid pairing proof\"}", "application/json");
+            return Ok(());
+        }
+
+        let _ = service.consume_pairing_session();
+        service.limiter().record_success(&confirm_req.device_id);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if let Err(e) = service.enroll_peer(openwearsync_security::PairedPeer {
+            device_id: confirm_req.device_id.clone(),
+            device_name: confirm_req.device_name,
+            shared_secret: pake_keys.shared_secret,
+            enrolled_at_epoch_s: now,
+            revoked: false,
+        }) {
+            send_error(stream, e);
+            return Ok(());
+        }
+
+        let resp = ConfirmResp {
+            status: "paired".to_string(),
+            device_id: confirm_req.device_id,
+            server_proof_hex: openwearsync_security::bytes_to_hex(&pake_keys.server_proof),
+            server_fingerprint: identity.fingerprint,
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        send_response(stream, 200, "OK", &json, "application/json");
+        return Ok(());
+    }
+
     if method == "POST" && path == "/v1/pair" {
         #[derive(serde::Deserialize)]
         struct PairReq {
@@ -391,13 +554,16 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             .unwrap_or_default()
             .as_secs();
 
-        let _ = service.enroll_peer(openwearsync_security::PairedPeer {
+        if let Err(e) = service.enroll_peer(openwearsync_security::PairedPeer {
             device_id: pair_req.device_id.clone(),
             device_name: pair_req.device_name,
             shared_secret: secret,
             enrolled_at_epoch_s: now,
             revoked: false,
-        });
+        }) {
+            send_error(stream, e);
+            return Ok(());
+        }
         service.limiter().record_success(&pair_req.device_id);
 
         let resp = PairResp {
@@ -518,13 +684,47 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
                 }
             };
 
+            let is_encrypted = headers.get("x-encrypted").map(|v| v == "true").unwrap_or(false);
+            let final_body = if is_encrypted {
+                let token_ref = match token.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        send_error(stream, ProtocolError {
+                            code: ErrorCode::InvalidRequest,
+                            message: "encrypted chunk requires authentication token".to_string(),
+                        });
+                        return Ok(());
+                    }
+                };
+                let secret = match service.registry().get_secret(&token_ref.device_id) {
+                    Some(s) => s,
+                    None => {
+                        send_error(stream, ProtocolError {
+                            code: ErrorCode::InvalidRequest,
+                            message: "device secret not found for chunk decryption".to_string(),
+                        });
+                        return Ok(());
+                    }
+                };
+                let chunk_idx = (offset / 65536) as u32;
+                match openwearsync_security::decrypt_chunk_payload(&secret, &token_ref.nonce, chunk_idx, &body) {
+                    Ok(dec) => dec,
+                    Err(e) => {
+                        send_error(stream, e);
+                        return Ok(());
+                    }
+                }
+            } else {
+                body
+            };
+
             let sha_opt = headers.get("x-chunk-sha256").and_then(|s| parse_hex_32(s));
             let chunk_sha = match sha_opt {
                 Some(s) => s,
-                None => openwearsync_transfer_core::hash_sha256(&body),
+                None => openwearsync_transfer_core::hash_sha256(&final_body),
             };
 
-            let chunk_desc = match ChunkDescriptor::new(offset, body.len() as u32, chunk_sha) {
+            let chunk_desc = match ChunkDescriptor::new(offset, final_body.len() as u32, chunk_sha) {
                 Ok(c) => c,
                 Err(e) => {
                     send_error(stream, e);
@@ -535,7 +735,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             let req = UploadChunkRequest {
                 transfer_id: transfer_id.to_string(),
                 chunk: chunk_desc,
-                payload: body,
+                payload: final_body,
             };
 
             match service.handle_request(Request::UploadChunk(req), token.as_ref()) {

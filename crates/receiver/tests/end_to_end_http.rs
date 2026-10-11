@@ -228,12 +228,13 @@ fn end_to_end_real_http_socket_transfer() {
     assert_eq!(received[0]["offset"], 0);
     assert_eq!(received[0]["length"], 65536);
 
-    // 10. Upload Chunk 1 (second 64 KB)
+    // 10. Upload Chunk 1 (second 64 KB) with authenticated encryption
     let chunk1 = &payload[64 * 1024..];
     let chunk1_sha_hex = to_hex_str(&hash_sha256(chunk1));
     let chunk1_path = "/v1/transfers/tx-http-test-1/chunks/65536";
     let fresh_token2 = AuthToken::create("watch-http-test", &shared_secret);
     let fresh_auth2 = format!("Bearer {}", serde_json::to_string(&fresh_token2).unwrap());
+    let encrypted_chunk1 = openwearsync_security::encrypt_chunk_payload(&shared_secret, &fresh_token2.nonce, 1, chunk1);
     let (status, chunk1_resp) = send_raw_http(
         addr,
         "PUT",
@@ -241,11 +242,12 @@ fn end_to_end_real_http_socket_transfer() {
         &[
             ("Content-Type", "application/octet-stream"),
             ("Authorization", &fresh_auth2),
+            ("x-encrypted", "true"),
             ("x-chunk-sha256", &chunk1_sha_hex),
         ],
-        chunk1,
+        &encrypted_chunk1,
     );
-    assert_eq!(status, 200, "Chunk 1 upload must succeed: {}", String::from_utf8_lossy(&chunk1_resp));
+    assert_eq!(status, 200, "Encrypted chunk 1 upload must succeed: {}", String::from_utf8_lossy(&chunk1_resp));
 
     // 11. Commit transfer over HTTP
     let fresh_token3 = AuthToken::create("watch-http-test", &shared_secret);
@@ -271,5 +273,79 @@ fn end_to_end_real_http_socket_transfer() {
     assert!(service.store().ledger().is_committed("tx-http-test-1"));
 
     // 13. Graceful shutdown
+    handle.stop();
+}
+
+#[test]
+fn end_to_end_pake_zero_knowledge_pairing_and_key_pinning() {
+    let temp = tempdir().unwrap();
+    let ledger_path = temp.path().join("ledger_pake.db");
+    let staging_dir = temp.path().join("staging_pake");
+    let dest_dir = temp.path().join("recordings_pake");
+
+    let ledger = DurableTransferLedger::open(&ledger_path).unwrap();
+    let store = Arc::new(DurableFileStore::new(staging_dir, dest_dir, ledger).unwrap());
+    let registry = Arc::new(PairedPeerRegistry::new());
+    let service = Arc::new(ReceiverService::new(store, registry, 2));
+
+    let server = HttpServer::bind("127.0.0.1:0", service.clone()).unwrap();
+    let handle = server.start_background().unwrap();
+    let addr = handle.local_addr();
+
+    // 1. Windows side initiates pairing session with a 6-digit PIN
+    let session_body = br#"{"pin":"852963","ttl_secs":300}"#;
+    let (status, sess_resp) = send_raw_http(addr, "POST", "/v1/pair/session", &[("Content-Type", "application/json")], session_body);
+    assert_eq!(status, 201);
+    let sess_val: serde_json::Value = serde_json::from_slice(&sess_resp).unwrap();
+    let session_id = sess_val["session_id"].as_str().unwrap();
+
+    // 2. Watch initiates PAKE pairing without sending PIN
+    let client_nonce = [0x55u8; 32];
+    let client_nonce_hex = to_hex_str(&client_nonce);
+    let init_req = serde_json::json!({
+        "device_id": "watch-pake-test",
+        "client_nonce_hex": client_nonce_hex,
+    });
+    let (status, init_resp) = send_raw_http(addr, "POST", "/v1/pair/initiate", &[("Content-Type", "application/json")], &serde_json::to_vec(&init_req).unwrap());
+    assert_eq!(status, 200);
+    let init_val: serde_json::Value = serde_json::from_slice(&init_resp).unwrap();
+    let server_nonce_hex = init_val["server_nonce_hex"].as_str().unwrap();
+    let salt_hex = init_val["salt_hex"].as_str().unwrap();
+    let server_fingerprint = init_val["server_fingerprint"].as_str().unwrap();
+
+    let server_nonce = openwearsync_security::hex_to_32(server_nonce_hex).unwrap();
+    let salt = openwearsync_security::hex_to_32(salt_hex).unwrap();
+
+    // 3. Watch derives PAKE keys locally from entered PIN
+    let pake_keys = openwearsync_security::derive_pake_keys(
+        "852963",
+        &salt,
+        &server_nonce,
+        &client_nonce,
+        "watch-pake-test",
+        server_fingerprint,
+    );
+
+    // 4. Watch sends confirm with client_proof (NO PIN ON WIRE!)
+    let confirm_req = serde_json::json!({
+        "session_id": session_id,
+        "device_id": "watch-pake-test",
+        "device_name": "Galaxy Watch 7 PAKE",
+        "client_nonce_hex": client_nonce_hex,
+        "client_proof_hex": to_hex_str(&pake_keys.client_proof),
+    });
+    let (status, confirm_resp) = send_raw_http(addr, "POST", "/v1/pair/confirm", &[("Content-Type", "application/json")], &serde_json::to_vec(&confirm_req).unwrap());
+    assert_eq!(status, 200);
+    let conf_val: serde_json::Value = serde_json::from_slice(&confirm_resp).unwrap();
+    assert_eq!(conf_val["status"], "paired");
+
+    // Verify server proof matches locally expected proof
+    let server_proof_hex = conf_val["server_proof_hex"].as_str().unwrap();
+    let server_proof = openwearsync_security::hex_to_32(server_proof_hex).unwrap();
+    assert_eq!(server_proof, pake_keys.server_proof, "Server must prove possession of PIN!");
+
+    // Verify peer is enrolled and can authenticate
+    assert!(service.registry().is_authorized("watch-pake-test"));
+
     handle.stop();
 }
