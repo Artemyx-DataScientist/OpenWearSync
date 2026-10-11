@@ -338,6 +338,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             session_id: String,
             server_nonce_hex: String,
             salt_hex: String,
+            server_masked_pk_hex: String,
             server_public_key_hex: String,
             server_fingerprint: String,
         }
@@ -374,6 +375,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             session_id: active_session.session_id,
             server_nonce_hex: openwearsync_security::bytes_to_hex(&active_session.server_nonce),
             salt_hex: openwearsync_security::bytes_to_hex(&active_session.salt),
+            server_masked_pk_hex: openwearsync_security::bytes_to_hex(&active_session.server_masked_pk),
             server_public_key_hex: openwearsync_security::bytes_to_hex(&identity.public_key),
             server_fingerprint: identity.fingerprint,
         };
@@ -389,6 +391,8 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             device_id: String,
             device_name: String,
             client_nonce_hex: String,
+            #[serde(default)]
+            client_masked_pk_hex: String,
             client_proof_hex: String,
         }
         #[derive(serde::Serialize)]
@@ -443,14 +447,26 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         };
 
         let identity = service.server_identity();
-        let pake_keys = openwearsync_security::derive_pake_keys(
-            &active_session.pin,
-            &active_session.salt,
-            &active_session.server_nonce,
-            &client_nonce,
-            &confirm_req.device_id,
-            &identity.fingerprint,
-        );
+        let pake_keys = if let Some(client_masked_pk) = openwearsync_security::hex_to_32(&confirm_req.client_masked_pk_hex) {
+            openwearsync_security::server_pake_exchange(
+                &active_session.pin,
+                &active_session.salt,
+                &active_session.server_nonce,
+                &client_nonce,
+                &client_masked_pk,
+                &identity.fingerprint,
+                &active_session.server_ephemeral_private,
+            )
+        } else {
+            openwearsync_security::derive_pake_keys(
+                &active_session.pin,
+                &active_session.salt,
+                &active_session.server_nonce,
+                &client_nonce,
+                &confirm_req.device_id,
+                &identity.fingerprint,
+            )
+        };
 
         if !openwearsync_security::constant_time_eq_32(&client_proof, &pake_keys.client_proof) {
             let _ = service.limiter().record_failure(&confirm_req.device_id);
@@ -482,94 +498,6 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             device_id: confirm_req.device_id,
             server_proof_hex: openwearsync_security::bytes_to_hex(&pake_keys.server_proof),
             server_fingerprint: identity.fingerprint,
-        };
-        let json = serde_json::to_vec(&resp).unwrap();
-        send_response(stream, 200, "OK", &json, "application/json");
-        return Ok(());
-    }
-
-    if method == "POST" && path == "/v1/pair" {
-        #[derive(serde::Deserialize)]
-        struct PairReq {
-            device_id: String,
-            device_name: String,
-            pin: String,
-        }
-        #[derive(serde::Serialize)]
-        struct PairResp {
-            status: String,
-            device_id: String,
-            server_fingerprint: String,
-        }
-
-        let pair_req: PairReq = match serde_json::from_slice(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                send_response(stream, 400, "Bad Request", format!("invalid pair json: {}", e).as_bytes(), "text/plain");
-                return Ok(());
-            }
-        };
-
-        if let Err(e) = service.limiter().check_allowed(&pair_req.device_id) {
-            send_error(stream, e);
-            return Ok(());
-        }
-
-        // Verify against active pairing session
-        let active_session = match service.get_active_pairing_session() {
-            Some(s) => s,
-            None => {
-                send_response(
-                    stream,
-                    403,
-                    "Forbidden",
-                    b"{\"error\":\"no active pairing session; initiate pairing on Windows first\"}",
-                    "application/json",
-                );
-                return Ok(());
-            }
-        };
-
-        // Validate 6-digit PIN format
-        if pair_req.pin.trim().len() != 6 || !pair_req.pin.trim().chars().all(|c| c.is_ascii_digit()) {
-            let _ = service.limiter().record_failure(&pair_req.device_id);
-            send_response(stream, 400, "Bad Request", b"PIN must be a 6-digit numeric string", "text/plain");
-            return Ok(());
-        }
-
-        // Verify candidate PIN matches active session PIN
-        if pair_req.pin.trim() != active_session.pin.trim() {
-            let _ = service.limiter().record_failure(&pair_req.device_id);
-            send_response(stream, 401, "Unauthorized", b"{\"error\":\"invalid pairing PIN\"}", "application/json");
-            return Ok(());
-        }
-
-        // Consume session so PIN cannot be reused
-        let _ = service.consume_pairing_session();
-
-        // Derive deterministic secret from PIN and device ID
-        let secret = openwearsync_security::hmac_sha256(pair_req.pin.trim().as_bytes(), pair_req.device_id.as_bytes());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        if let Err(e) = service.enroll_peer(openwearsync_security::PairedPeer {
-            device_id: pair_req.device_id.clone(),
-            device_name: pair_req.device_name,
-            shared_secret: secret,
-            enrolled_at_epoch_s: now,
-            revoked: false,
-        }) {
-            send_error(stream, e);
-            return Ok(());
-        }
-        service.limiter().record_success(&pair_req.device_id);
-
-        let resp = PairResp {
-            status: "paired".to_string(),
-            device_id: pair_req.device_id,
-            server_fingerprint: service.server_fingerprint(),
         };
         let json = serde_json::to_vec(&resp).unwrap();
         send_response(stream, 200, "OK", &json, "application/json");

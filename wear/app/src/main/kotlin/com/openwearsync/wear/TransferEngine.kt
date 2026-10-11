@@ -88,7 +88,12 @@ class TransferEngine {
         // OUTPUTS: { String - JSON serialized AuthToken }
         // SIDE_EFFECTS: generates 16-byte cryptographically secure random nonce.
         // END_CONTRACT: createAuthToken
-        fun createAuthToken(deviceId: String, sharedSecretHex: String): String {
+        data class TokenData(
+            val authHeader: String,
+            val nonce: ByteArray,
+        )
+
+        fun createAuthTokenData(deviceId: String, sharedSecretHex: String): TokenData {
             val secret = fromHex(sharedSecretHex)
             val now = System.currentTimeMillis() / 1000L
             val nonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
@@ -108,7 +113,12 @@ class TransferEngine {
             val nonceArray = nonce.joinToString(",") { (it.toInt() and 0xFF).toString() }
             val sigArray = sig.joinToString(",") { (it.toInt() and 0xFF).toString() }
 
-            return """{"device_id":"$deviceId","timestamp_epoch_s":$now,"nonce":[$nonceArray],"signature":[$sigArray]}"""
+            val json = """{"device_id":"$deviceId","timestamp_epoch_s":$now,"nonce":[$nonceArray],"signature":[$sigArray]}"""
+            return TokenData("Bearer $json", nonce)
+        }
+
+        fun createAuthToken(deviceId: String, sharedSecretHex: String): String {
+            return createAuthTokenData(deviceId, sharedSecretHex).authHeader.removePrefix("Bearer ")
         }
 
         // START_CONTRACT: computeTransferId
@@ -157,6 +167,7 @@ class TransferEngine {
                 val sessionId = extractJsonField(resp, "session_id") ?: return PairingResult(false, error = "Missing session_id")
                 val serverNonceHex = extractJsonField(resp, "server_nonce_hex") ?: return PairingResult(false, error = "Missing server_nonce_hex")
                 val saltHex = extractJsonField(resp, "salt_hex") ?: return PairingResult(false, error = "Missing salt_hex")
+                val serverMaskedPkHex = extractJsonField(resp, "server_masked_pk_hex")
                 val serverFp = extractJsonField(resp, "server_fingerprint") ?: ""
 
                 // Verify pinned fingerprint if previously established
@@ -176,9 +187,10 @@ class TransferEngine {
                     clientNonceHex = clientNonceHex,
                     deviceId = deviceId,
                     serverFingerprint = serverFp,
+                    serverMaskedPkHex = serverMaskedPkHex,
                 )
 
-                // Step 3: Confirm with client proof
+                // Step 3: Confirm with client proof and masked ephemeral public key
                 val confirmUrl = URL("http://${endpoint.host}:${endpoint.port}/v1/pair/confirm")
                 val confirmConn = (confirmUrl.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -193,6 +205,7 @@ class TransferEngine {
                     "device_id":"$deviceId",
                     "device_name":"$deviceName",
                     "client_nonce_hex":"$clientNonceHex",
+                    "client_masked_pk_hex":"${pakeResult.clientMaskedPkHex}",
                     "client_proof_hex":"${pakeResult.clientProofHex}"
                 }""".trimIndent()
                 confirmConn.outputStream.use { it.write(confirmBody.toByteArray(Charsets.UTF_8)) }
@@ -216,29 +229,8 @@ class TransferEngine {
                     PairingResult(false, error = err)
                 }
             } else {
-                // Fallback for legacy basic pair endpoint
-                val url = URL("http://${endpoint.host}:${endpoint.port}/v1/pair")
-                val conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 10_000
-                    readTimeout = 10_000
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("Connection", "close")
-                }
-                val jsonBody = """{"device_id":"$deviceId","device_name":"$deviceName","pin":"$pin"}"""
-                conn.outputStream.use { it.write(jsonBody.toByteArray(Charsets.UTF_8)) }
-                val code = conn.responseCode
-                if (code == 200) {
-                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                    val fingerprint = extractJsonField(resp, "server_fingerprint") ?: ""
-                    val derivedSecret = NativeTransferBridge.deriveSharedSecret(pin, deviceId)
-                    val secretHex = toHex(derivedSecret)
-                    PairingResult(success = true, sharedSecretHex = secretHex, serverFingerprint = fingerprint)
-                } else {
-                    val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP $code"
-                    PairingResult(success = false, error = err)
-                }
+                val err = initConn.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP $initCode"
+                PairingResult(false, error = "Initiate pairing failed: $err")
             }
         } catch (e: Exception) {
             PairingResult(success = false, error = e.message ?: "Connection failed")
@@ -270,7 +262,9 @@ class TransferEngine {
         val totalBytes = descriptor.sizeBytes
         val fileName = descriptor.displayName
         val transferId = computeTransferId(descriptor)
-        val token = getAuthHeader(deviceId, sharedSecretHex) ?: ""
+        val tokenData = if (deviceId != null && sharedSecretHex != null) createAuthTokenData(deviceId, sharedSecretHex) else null
+        val token = tokenData?.authHeader ?: ""
+        val tokenNonce = tokenData?.nonce ?: ByteArray(16)
 
         val nativeSession = NativeTransferBridge.createSession(totalBytes)
         onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.CONNECTING))
@@ -342,6 +336,7 @@ class TransferEngine {
         // 4. Query reconciliation via native socket bridge
         onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.RECONCILING))
         val (recCode, recResp) = NativeTransferBridge.reconcileSocket(
+            nativeSession,
             endpoint.host,
             endpoint.port,
             transferId,
@@ -402,16 +397,18 @@ class TransferEngine {
 
                     val rawChunkData = chunkBuf.copyOf(bytesRead)
                     val chunkSha = toHex(NativeTransferBridge.computeSha256(rawChunkData))
+                    val chunkIdx = (offset / (64 * 1024L)).toInt()
 
                     // Encrypt payload if shared secret is available
                     val (payloadToSend, isEncrypted) = if (deviceSecretBytes != null) {
-                        Pair(NativeTransferBridge.encryptChunk(deviceSecretBytes, offset, rawChunkData), true)
+                        Pair(NativeTransferBridge.encryptChunk(deviceSecretBytes, tokenNonce, chunkIdx, rawChunkData), true)
                     } else {
                         Pair(rawChunkData, false)
                     }
 
                     // Native socket chunk upload
                     val upCode = NativeTransferBridge.uploadChunkSocket(
+                        handle = nativeSession,
                         host = endpoint.host,
                         port = endpoint.port,
                         transferId = transferId,

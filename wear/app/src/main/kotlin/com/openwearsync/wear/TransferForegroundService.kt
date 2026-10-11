@@ -19,6 +19,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
 // START_MODULE_CONTRACT
 // PURPOSE: Android Foreground Service owning active transfer coroutine, partial wakelock, Wi-Fi lock, and explicit Wi-Fi network binding.
@@ -191,20 +194,6 @@ class TransferForegroundService : Service() {
             return
         }
 
-        // Explicit Wi-Fi binding via WifiNetworkSession
-        try {
-            val requester = AndroidWifiNetworkRequester(applicationContext)
-            val session = WifiNetworkSession(requester)
-            wifiLease = session.start(
-                onReady = {
-                    // Bound to Wi-Fi network!
-                },
-                onFailure = { failure ->
-                    // Notification of failure; transfer engine will continue on available routes
-                },
-            )
-        } catch (_: Throwable) {}
-
         val engine = TransferEngine()
         activeEngine = engine
         _isTransferring.value = true
@@ -213,6 +202,43 @@ class TransferForegroundService : Service() {
         transferJob = serviceScope.launch {
             val startTime = System.currentTimeMillis()
             try {
+                // Strict Wi-Fi binding via WifiNetworkSession before transfer: fail-closed if binding fails
+                val boundToWifi = try {
+                    withTimeoutOrNull(10_000L) {
+                        suspendCancellableCoroutine { cont ->
+                            try {
+                                val requester = AndroidWifiNetworkRequester(applicationContext)
+                                val session = WifiNetworkSession(requester)
+                                wifiLease = session.start(
+                                    onReady = {
+                                        if (cont.isActive) cont.resume(true)
+                                    },
+                                    onFailure = {
+                                        if (cont.isActive) cont.resume(false)
+                                    },
+                                )
+                                cont.invokeOnCancellation {
+                                    wifiLease?.close()
+                                    wifiLease = null
+                                }
+                            } catch (_: Throwable) {
+                                if (cont.isActive) cont.resume(false)
+                            }
+                        }
+                    } ?: false
+                } catch (_: Throwable) {
+                    false
+                }
+
+                if (!boundToWifi) {
+                    _progressFlow.value = TransferProgress(
+                        fileName = descriptor.displayName,
+                        status = TransferStatus.FAILED,
+                        errorMessage = "Cannot bind process to Wi-Fi network. Transfer aborted for safety (fail-closed).",
+                    )
+                    return@launch
+                }
+
                 engine.transferRecording(
                     endpoint = endpoint,
                     descriptor = descriptor,

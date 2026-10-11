@@ -116,25 +116,84 @@ fn end_to_end_real_http_socket_transfer() {
     assert_eq!(status, 201);
     assert!(String::from_utf8_lossy(&resp).contains("741258"));
 
-    // 3. Attempt pairing with WRONG PIN -> must be rejected with 401
-    let wrong_pair_body = br#"{"device_id":"watch-http-test","device_name":"Galaxy Watch Ultra","pin":"000000"}"#;
-    let (status, _) = send_raw_http(addr, "POST", "/v1/pair", &[("Content-Type", "application/json")], wrong_pair_body);
-    assert_eq!(status, 401, "Wrong PIN must be rejected with 401");
+    // 3. Initiate client pairing request
+    let init_body = br#"{"device_id":"watch-http-test"}"#;
+    let (status, init_resp) = send_raw_http(addr, "POST", "/v1/pair/initiate", &[("Content-Type", "application/json")], init_body);
+    assert_eq!(status, 200);
+    let init_val: serde_json::Value = serde_json::from_slice(&init_resp).unwrap();
+    let session_id = init_val["session_id"].as_str().unwrap().to_string();
+    let server_nonce_hex = init_val["server_nonce_hex"].as_str().unwrap().to_string();
+    let salt_hex = init_val["salt_hex"].as_str().unwrap().to_string();
+    let server_masked_pk_hex = init_val["server_masked_pk_hex"].as_str().unwrap().to_string();
+    let server_fingerprint = init_val["server_fingerprint"].as_str().unwrap().to_string();
 
-    // 4. Pair with CORRECT PIN -> must succeed with 200
-    let correct_pair_body = br#"{"device_id":"watch-http-test","device_name":"Galaxy Watch Ultra","pin":"741258"}"#;
-    let (status, resp) = send_raw_http(addr, "POST", "/v1/pair", &[("Content-Type", "application/json")], correct_pair_body);
-    assert_eq!(status, 200, "Correct PIN must succeed with 200");
-    let resp_str = String::from_utf8_lossy(&resp);
-    assert!(resp_str.contains("paired"));
+    let server_nonce = openwearsync_security::hex_to_32(&server_nonce_hex).unwrap();
+    let salt = openwearsync_security::hex_to_32(&salt_hex).unwrap();
+    let server_masked_pk = openwearsync_security::hex_to_32(&server_masked_pk_hex).unwrap();
 
-    // Verify server_fingerprint is present and shared_secret_hex is NOT leaked
-    let json_val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
-    assert!(json_val.get("server_fingerprint").is_some());
-    assert!(json_val.get("shared_secret_hex").is_none(), "Server must NOT leak shared secret over the wire!");
+    let client_ephemeral_private = [0x55u8; 32];
+    let client_nonce = [0x77u8; 32];
+    let client_nonce_hex = to_hex_str(&client_nonce);
 
-    // Client derives shared secret locally from PIN and device ID
-    let shared_secret = openwearsync_security::hmac_sha256(b"741258", b"watch-http-test");
+    // 4a. Attempt confirmation with WRONG PIN -> must be rejected with 401
+    let wrong_keys = openwearsync_security::client_pake_exchange(
+        "000000",
+        &salt,
+        &server_nonce,
+        &client_nonce,
+        &server_masked_pk,
+        &server_fingerprint,
+        &client_ephemeral_private,
+    );
+    let wrong_confirm_body = serde_json::json!({
+        "session_id": session_id,
+        "device_id": "watch-http-test",
+        "device_name": "Galaxy Watch Ultra",
+        "client_nonce_hex": client_nonce_hex,
+        "client_masked_pk_hex": to_hex_str(&wrong_keys.client_masked_pk),
+        "client_proof_hex": to_hex_str(&wrong_keys.client_proof),
+    });
+    let (status, _) = send_raw_http(
+        addr,
+        "POST",
+        "/v1/pair/confirm",
+        &[("Content-Type", "application/json")],
+        &serde_json::to_vec(&wrong_confirm_body).unwrap(),
+    );
+    assert_eq!(status, 401, "Wrong PIN proof must be rejected with 401");
+
+    // 4b. Confirm with CORRECT PIN -> must succeed with 200
+    let client_keys = openwearsync_security::client_pake_exchange(
+        "741258",
+        &salt,
+        &server_nonce,
+        &client_nonce,
+        &server_masked_pk,
+        &server_fingerprint,
+        &client_ephemeral_private,
+    );
+    let correct_confirm_body = serde_json::json!({
+        "session_id": session_id,
+        "device_id": "watch-http-test",
+        "device_name": "Galaxy Watch Ultra",
+        "client_nonce_hex": client_nonce_hex,
+        "client_masked_pk_hex": to_hex_str(&client_keys.client_masked_pk),
+        "client_proof_hex": to_hex_str(&client_keys.client_proof),
+    });
+    let (status, resp) = send_raw_http(
+        addr,
+        "POST",
+        "/v1/pair/confirm",
+        &[("Content-Type", "application/json")],
+        &serde_json::to_vec(&correct_confirm_body).unwrap(),
+    );
+    assert_eq!(status, 200, "Correct PIN proof must succeed with 200");
+    let resp_val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(resp_val["status"], "paired");
+    let server_proof_hex = resp_val["server_proof_hex"].as_str().unwrap();
+    assert_eq!(server_proof_hex, to_hex_str(&client_keys.server_proof), "Server proof must match client expectations");
+
+    let shared_secret = client_keys.shared_secret;
 
     // 4b. Test reconcile on non-existent transfer -> must return 404 TransferNotFound!
     let non_existent_token = AuthToken::create("watch-http-test", &shared_secret);

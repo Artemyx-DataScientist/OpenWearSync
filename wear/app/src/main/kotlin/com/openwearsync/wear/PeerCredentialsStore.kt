@@ -92,7 +92,7 @@ class PeerCredentialsStore(private val context: Context) {
         }
     }
 
-    private fun encryptString(plaintext: String): String {
+    private fun encryptString(plaintext: String): String? {
         return try {
             val secretKey = getSecretKey()
             val cipher = Cipher.getInstance(AES_GCM_NO_PADDING)
@@ -104,7 +104,7 @@ class PeerCredentialsStore(private val context: Context) {
             System.arraycopy(ciphertext, 0, combined, iv.size, ciphertext.size)
             bytesToHex(combined)
         } catch (_: Throwable) {
-            bytesToHex(plaintext.toByteArray(Charsets.UTF_8))
+            null
         }
     }
 
@@ -121,11 +121,7 @@ class PeerCredentialsStore(private val context: Context) {
             val decryptedBytes = cipher.doFinal(ciphertext)
             String(decryptedBytes, Charsets.UTF_8)
         } catch (_: Throwable) {
-            try {
-                String(hexToBytes(hex), Charsets.UTF_8)
-            } catch (_: Throwable) {
-                null
-            }
+            null
         }
     }
 
@@ -157,9 +153,13 @@ class PeerCredentialsStore(private val context: Context) {
         serverFingerprint: String,
         host: String,
         port: Int,
-    ) {
-        val encSecret = encryptString(sharedSecretHex)
-        val encFp = encryptString(serverFingerprint)
+    ): Boolean {
+        val encSecret = encryptString(sharedSecretHex) ?: return false
+        val encFp = if (serverFingerprint.isNotEmpty()) {
+            encryptString(serverFingerprint) ?: return false
+        } else {
+            ""
+        }
         prefs.edit()
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_SHARED_SECRET_ENC, encSecret)
@@ -167,6 +167,7 @@ class PeerCredentialsStore(private val context: Context) {
             .putString(KEY_RECEIVER_HOST, host)
             .putInt(KEY_RECEIVER_PORT, port)
             .apply()
+        return true
     }
 
     fun clearPairing() {

@@ -64,13 +64,14 @@ class TransferEngineAndSecurityTest {
     @Test
     fun testChunkEncryptionGeneratesAuthenticatedCiphertext() {
         val key = ByteArray(32) { (it * 3).toByte() }
+        val nonce = ByteArray(16) { (it + 5).toByte() }
         val payload = "OpenWearSync voice recording chunk data payload".toByteArray(Charsets.UTF_8)
-        val offset = 0L
+        val chunkIndex = 0
 
-        val encrypted = NativeTransferBridge.encryptChunk(key, offset, payload)
+        val encrypted = NativeTransferBridge.encryptChunk(key, nonce, chunkIndex, payload)
 
-        // Encrypted chunk must include 16-byte nonce + ciphertext + 32-byte auth tag
-        assertEquals(16 + payload.size + 32, encrypted.size)
+        // Encrypted chunk wire format: ciphertext + 32-byte auth tag (nonce is provided in auth token)
+        assertEquals(payload.size + 32, encrypted.size)
 
         // Plaintext must not be exposed in ciphertext
         assertFalse(String(encrypted, Charsets.ISO_8859_1).contains("OpenWearSync voice recording"))

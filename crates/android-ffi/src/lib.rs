@@ -328,14 +328,16 @@ pub fn execute_http_request(
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct JniEnvTable {
-    _prefix: [*const (); 167],
+    _prefix: [*const (); 169],
     pub get_string_utf_chars: extern "C" fn(*mut JniEnv, *mut (), *mut u8) -> *const std::ffi::c_char,
     pub release_string_utf_chars: extern "C" fn(*mut JniEnv, *mut (), *const std::ffi::c_char),
     pub get_array_length: extern "C" fn(*mut JniEnv, *mut ()) -> i32,
-    _pad_arr: [*const (); 14],
+    _pad_arr: [*const (); 12],
     pub get_byte_array_elements: extern "C" fn(*mut JniEnv, *mut (), *mut u8) -> *mut i8,
     _pad_arr2: [*const (); 7],
     pub release_byte_array_elements: extern "C" fn(*mut JniEnv, *mut (), *mut i8, i32),
+    _pad_arr3: [*const (); 15],
+    pub set_byte_array_region: extern "C" fn(*mut JniEnv, *mut (), i32, i32, *const i8),
 }
 
 pub type JniEnv = *const JniEnvTable;
@@ -361,6 +363,12 @@ unsafe fn jbyte_array_to_vec(env: *mut JniEnv, jarr: *mut ()) -> Option<Vec<u8>>
     let vec = slice.to_vec();
     (table.release_byte_array_elements)(env, jarr, ptr, 0);
     Some(vec)
+}
+
+unsafe fn copy_slice_to_jbyte_array(env: *mut JniEnv, jarr: *mut (), slice: &[u8]) {
+    if jarr.is_null() || env.is_null() { return; }
+    let table = **env;
+    (table.set_byte_array_region)(env, jarr, 0, slice.len() as i32, slice.as_ptr() as *const i8);
 }
 
 // Crypto & security helpers
@@ -698,28 +706,9 @@ pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeD
         &pin, &salt, &server_nonce, &client_nonce, &device_id, &server_fingerprint
     );
 
-    let table = **env;
-    if !out_client_proof_jarr.is_null() {
-        let ptr = (table.get_byte_array_elements)(env, out_client_proof_jarr, std::ptr::null_mut());
-        if !ptr.is_null() {
-            std::ptr::copy_nonoverlapping(keys.client_proof.as_ptr(), ptr as *mut u8, 32);
-            (table.release_byte_array_elements)(env, out_client_proof_jarr, ptr, 0);
-        }
-    }
-    if !out_server_proof_jarr.is_null() {
-        let ptr = (table.get_byte_array_elements)(env, out_server_proof_jarr, std::ptr::null_mut());
-        if !ptr.is_null() {
-            std::ptr::copy_nonoverlapping(keys.server_proof.as_ptr(), ptr as *mut u8, 32);
-            (table.release_byte_array_elements)(env, out_server_proof_jarr, ptr, 0);
-        }
-    }
-    if !out_shared_secret_jarr.is_null() {
-        let ptr = (table.get_byte_array_elements)(env, out_shared_secret_jarr, std::ptr::null_mut());
-        if !ptr.is_null() {
-            std::ptr::copy_nonoverlapping(keys.shared_secret.as_ptr(), ptr as *mut u8, 32);
-            (table.release_byte_array_elements)(env, out_shared_secret_jarr, ptr, 0);
-        }
-    }
+    copy_slice_to_jbyte_array(env, out_client_proof_jarr, &keys.client_proof);
+    copy_slice_to_jbyte_array(env, out_server_proof_jarr, &keys.server_proof);
+    copy_slice_to_jbyte_array(env, out_shared_secret_jarr, &keys.shared_secret);
     ERROR_OK
 }
 
@@ -743,12 +732,7 @@ pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeE
     nonce.copy_from_slice(&nonce_vec);
 
     let encrypted = openwearsync_security::encrypt_chunk_payload(&secret, &nonce, chunk_index as u32, &plaintext);
-
-    let table = **env;
-    let ptr = (table.get_byte_array_elements)(env, out_encrypted_jarr, std::ptr::null_mut());
-    if ptr.is_null() { return ERROR_INVALID_ARGUMENT; }
-    std::ptr::copy_nonoverlapping(encrypted.as_ptr(), ptr as *mut u8, encrypted.len());
-    (table.release_byte_array_elements)(env, out_encrypted_jarr, ptr, 0);
+    copy_slice_to_jbyte_array(env, out_encrypted_jarr, &encrypted);
     encrypted.len() as i32
 }
 
@@ -761,12 +745,7 @@ pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeC
 ) -> i32 {
     let data = match jbyte_array_to_vec(env, data_jarr) { Some(v) => v, None => return ERROR_INVALID_ARGUMENT };
     let hash = openwearsync_transfer_core::hash_sha256(&data);
-
-    let table = **env;
-    let ptr = (table.get_byte_array_elements)(env, out_sha_jarr, std::ptr::null_mut());
-    if ptr.is_null() { return ERROR_INVALID_ARGUMENT; }
-    std::ptr::copy_nonoverlapping(hash.as_ptr(), ptr as *mut u8, 32);
-    (table.release_byte_array_elements)(env, out_sha_jarr, ptr, 0);
+    copy_slice_to_jbyte_array(env, out_sha_jarr, &hash);
     ERROR_OK
 }
 

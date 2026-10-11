@@ -4,6 +4,7 @@ use openwearsync_protocol::{ErrorCode, ProtocolError, ProtocolResult};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey, StaticSecret};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -218,7 +219,9 @@ impl ServerIdentity {
     }
 
     pub fn from_private_key(private_key: [u8; 32]) -> Self {
-        let public_key = hmac_sha256(&private_key, b"OpenWearSync-Server-Public-Key-v1");
+        let secret = StaticSecret::from(private_key);
+        let public = PublicKey::from(&secret);
+        let public_key = *public.as_bytes();
         let digest = Sha256::digest(&public_key);
         let fingerprint = bytes_to_hex(&digest);
         Self {
@@ -238,36 +241,63 @@ pub struct PairingSession {
     pub client_id: String,
     pub pin: String,
     pub expires_at_epoch_s: u64,
+    pub server_ephemeral_private: [u8; 32],
+    pub server_masked_pk: [u8; 32],
 }
 
 impl PairingSession {
-    // START_CONTRACT: PairingSession::new
-    // PURPOSE: Initialize an enrollment session with a 6-digit PIN and cryptographic salt & nonce.
-    // INPUTS: { client_id: String, ttl_secs: u64 }
+    // START_CONTRACT: PairingSession::with_pin
+    // PURPOSE: Initialize an enrollment session with a specified PIN, random ephemeral keys, and masked public key.
+    // INPUTS: { client_id: String, pin: String, ttl_secs: u64 }
     // OUTPUTS: { Self }
-    // SIDE_EFFECTS: fills random server nonce, salt, and session ID from OS RNG.
-    // END_CONTRACT: PairingSession::new
-    pub fn new(client_id: String, ttl_secs: u64) -> Self {
-        let nonce = generate_random_bytes_32();
+    // SIDE_EFFECTS: fills random server nonce, salt, ephemeral keys, and session ID from OS RNG.
+    // END_CONTRACT: PairingSession::with_pin
+    pub fn with_pin(client_id: String, pin: String, ttl_secs: u64) -> Self {
+        let server_nonce = generate_random_bytes_32();
         let salt = generate_random_bytes_32();
         let mut id_bytes = [0u8; 16];
         OsRng.fill_bytes(&mut id_bytes);
 
-        let pin = generate_pairing_pin();
         let session_id = format!("pair-{}", bytes_to_hex(&id_bytes));
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        let server_ephemeral_private = generate_random_bytes_32();
+        let secret = StaticSecret::from(server_ephemeral_private);
+        let public = PublicKey::from(&secret);
+        let pub_bytes = *public.as_bytes();
+
+        let stretched = stretch_pin(&pin, &salt, 5000);
+        let mask_y = hmac_sha256(&stretched, b"OpenWearSync-PAKE-Mask-Y-v1");
+
+        let mut server_masked_pk = [0u8; 32];
+        for i in 0..32 {
+            server_masked_pk[i] = pub_bytes[i] ^ mask_y[i];
+        }
+
         Self {
             session_id,
-            server_nonce: nonce,
+            server_nonce,
             salt,
             client_id,
             pin,
             expires_at_epoch_s: now + ttl_secs,
+            server_ephemeral_private,
+            server_masked_pk,
         }
+    }
+
+    // START_CONTRACT: PairingSession::new
+    // PURPOSE: Initialize an enrollment session with a 6-digit PIN and cryptographic salt & nonce.
+    // INPUTS: { client_id: String, ttl_secs: u64 }
+    // OUTPUTS: { Self }
+    // SIDE_EFFECTS: generates 6-digit PIN and initializes session.
+    // END_CONTRACT: PairingSession::new
+    pub fn new(client_id: String, ttl_secs: u64) -> Self {
+        let pin = generate_pairing_pin();
+        Self::with_pin(client_id, pin, ttl_secs)
     }
 
     pub fn is_expired(&self) -> bool {
@@ -308,6 +338,15 @@ pub struct PakeKeys {
     pub shared_secret: [u8; 32],
 }
 
+/// Result of client PAKE exchange containing masked public key, proofs and shared secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PakeClientResult {
+    pub client_masked_pk: [u8; 32],
+    pub client_proof: [u8; 32],
+    pub server_proof: [u8; 32],
+    pub shared_secret: [u8; 32],
+}
+
 /// Key stretching on PIN using iterative HMAC-SHA256 (PBKDF2-like).
 pub fn stretch_pin(pin: &str, salt: &[u8; 32], iterations: u32) -> [u8; 32] {
     let mut current = hmac_sha256(pin.as_bytes(), salt);
@@ -315,6 +354,111 @@ pub fn stretch_pin(pin: &str, salt: &[u8; 32], iterations: u32) -> [u8; 32] {
         current = hmac_sha256(pin.as_bytes(), &current);
     }
     current
+}
+
+/// Performs client-side PAKE exchange with ephemeral scalar, unmasking server public key and computing proofs.
+pub fn client_pake_exchange(
+    pin: &str,
+    salt: &[u8; 32],
+    server_nonce: &[u8; 32],
+    client_nonce: &[u8; 32],
+    server_masked_pk: &[u8; 32],
+    server_fingerprint: &str,
+    client_ephemeral_private: &[u8; 32],
+) -> PakeClientResult {
+    let stretched = stretch_pin(pin, salt, 5000);
+    let client_secret = StaticSecret::from(*client_ephemeral_private);
+    let client_pub = PublicKey::from(&client_secret);
+    let client_pub_bytes = *client_pub.as_bytes();
+
+    let mask_x = hmac_sha256(&stretched, b"OpenWearSync-PAKE-Mask-X-v1");
+    let mut client_masked_pk = [0u8; 32];
+    for i in 0..32 {
+        client_masked_pk[i] = client_pub_bytes[i] ^ mask_x[i];
+    }
+
+    let mask_y = hmac_sha256(&stretched, b"OpenWearSync-PAKE-Mask-Y-v1");
+    let mut server_pk = [0u8; 32];
+    for i in 0..32 {
+        server_pk[i] = server_masked_pk[i] ^ mask_y[i];
+    }
+    let server_pub = PublicKey::from(server_pk);
+    let dh_shared = client_secret.diffie_hellman(&server_pub);
+
+    let mut master_input = Vec::new();
+    master_input.extend_from_slice(b"OpenWearSync-PAKE-SessionKey-v1");
+    master_input.extend_from_slice(&stretched);
+    master_input.extend_from_slice(server_nonce);
+    master_input.extend_from_slice(client_nonce);
+    master_input.extend_from_slice(server_fingerprint.as_bytes());
+    let shared_secret = hmac_sha256(dh_shared.as_bytes(), &master_input);
+
+    let mut cp_input = Vec::new();
+    cp_input.extend_from_slice(b"OpenWearSync-ClientProof-v1");
+    cp_input.extend_from_slice(client_nonce);
+    cp_input.extend_from_slice(server_nonce);
+    let client_proof = hmac_sha256(&shared_secret, &cp_input);
+
+    let mut sp_input = Vec::new();
+    sp_input.extend_from_slice(b"OpenWearSync-ServerProof-v1");
+    sp_input.extend_from_slice(server_nonce);
+    sp_input.extend_from_slice(client_nonce);
+    let server_proof = hmac_sha256(&shared_secret, &sp_input);
+
+    PakeClientResult {
+        client_masked_pk,
+        client_proof,
+        server_proof,
+        shared_secret,
+    }
+}
+
+/// Performs server-side PAKE exchange, unmasking client public key and computing proofs.
+pub fn server_pake_exchange(
+    pin: &str,
+    salt: &[u8; 32],
+    server_nonce: &[u8; 32],
+    client_nonce: &[u8; 32],
+    client_masked_pk: &[u8; 32],
+    server_fingerprint: &str,
+    server_ephemeral_private: &[u8; 32],
+) -> PakeKeys {
+    let stretched = stretch_pin(pin, salt, 5000);
+    let server_secret = StaticSecret::from(*server_ephemeral_private);
+
+    let mask_x = hmac_sha256(&stretched, b"OpenWearSync-PAKE-Mask-X-v1");
+    let mut client_pk = [0u8; 32];
+    for i in 0..32 {
+        client_pk[i] = client_masked_pk[i] ^ mask_x[i];
+    }
+    let client_pub = PublicKey::from(client_pk);
+    let dh_shared = server_secret.diffie_hellman(&client_pub);
+
+    let mut master_input = Vec::new();
+    master_input.extend_from_slice(b"OpenWearSync-PAKE-SessionKey-v1");
+    master_input.extend_from_slice(&stretched);
+    master_input.extend_from_slice(server_nonce);
+    master_input.extend_from_slice(client_nonce);
+    master_input.extend_from_slice(server_fingerprint.as_bytes());
+    let shared_secret = hmac_sha256(dh_shared.as_bytes(), &master_input);
+
+    let mut cp_input = Vec::new();
+    cp_input.extend_from_slice(b"OpenWearSync-ClientProof-v1");
+    cp_input.extend_from_slice(client_nonce);
+    cp_input.extend_from_slice(server_nonce);
+    let client_proof = hmac_sha256(&shared_secret, &cp_input);
+
+    let mut sp_input = Vec::new();
+    sp_input.extend_from_slice(b"OpenWearSync-ServerProof-v1");
+    sp_input.extend_from_slice(server_nonce);
+    sp_input.extend_from_slice(client_nonce);
+    let server_proof = hmac_sha256(&shared_secret, &sp_input);
+
+    PakeKeys {
+        client_proof,
+        server_proof,
+        shared_secret,
+    }
 }
 
 /// Derives PAKE mutual authentication proofs and shared secret.
@@ -328,25 +472,43 @@ pub fn derive_pake_keys(
 ) -> PakeKeys {
     let stretched = stretch_pin(pin, salt, 5000);
 
-    let mut auth_input = Vec::with_capacity(32 + 32 + 32 + device_id.len());
-    auth_input.extend_from_slice(b"OpenWearSync-PAKE-Auth-v1");
-    auth_input.extend_from_slice(server_nonce);
-    auth_input.extend_from_slice(client_nonce);
-    auth_input.extend_from_slice(device_id.as_bytes());
-    let k_auth = hmac_sha256(&stretched, &auth_input);
+    let mut client_priv_seed_input = Vec::new();
+    client_priv_seed_input.extend_from_slice(client_nonce);
+    client_priv_seed_input.extend_from_slice(server_nonce);
+    client_priv_seed_input.extend_from_slice(device_id.as_bytes());
+    let client_priv_seed = Sha256::digest(&client_priv_seed_input);
+    let mut client_priv = [0u8; 32];
+    client_priv.copy_from_slice(&client_priv_seed);
 
-    let mut master_input = Vec::with_capacity(32 + server_fingerprint.len());
-    master_input.extend_from_slice(b"OpenWearSync-PAKE-Master-v1");
+    let mut server_priv_seed_input = Vec::new();
+    server_priv_seed_input.extend_from_slice(server_nonce);
+    server_priv_seed_input.extend_from_slice(salt);
+    let server_priv_seed = Sha256::digest(&server_priv_seed_input);
+    let mut server_priv = [0u8; 32];
+    server_priv.copy_from_slice(&server_priv_seed);
+
+    let client_secret = StaticSecret::from(client_priv);
+    let server_secret = StaticSecret::from(server_priv);
+    let server_pub = PublicKey::from(&server_secret);
+
+    let dh_shared = client_secret.diffie_hellman(&server_pub);
+
+    let mut master_input = Vec::new();
+    master_input.extend_from_slice(b"OpenWearSync-PAKE-SessionKey-v1");
+    master_input.extend_from_slice(&stretched);
+    master_input.extend_from_slice(server_nonce);
+    master_input.extend_from_slice(client_nonce);
     master_input.extend_from_slice(server_fingerprint.as_bytes());
-    let shared_secret = hmac_sha256(&k_auth, &master_input);
 
-    let mut cp_input = Vec::with_capacity(32 + 32 + 32);
+    let shared_secret = hmac_sha256(dh_shared.as_bytes(), &master_input);
+
+    let mut cp_input = Vec::new();
     cp_input.extend_from_slice(b"OpenWearSync-ClientProof-v1");
     cp_input.extend_from_slice(client_nonce);
     cp_input.extend_from_slice(server_nonce);
     let client_proof = hmac_sha256(&shared_secret, &cp_input);
 
-    let mut sp_input = Vec::with_capacity(32 + 32 + 32);
+    let mut sp_input = Vec::new();
     sp_input.extend_from_slice(b"OpenWearSync-ServerProof-v1");
     sp_input.extend_from_slice(server_nonce);
     sp_input.extend_from_slice(client_nonce);
@@ -776,5 +938,38 @@ mod tests {
         let reconstructed = ServerIdentity::from_private_key(id.private_key);
         assert_eq!(reconstructed.public_key, id.public_key);
         assert_eq!(reconstructed.fingerprint, id.fingerprint);
+    }
+
+    #[test]
+    fn full_pake_x25519_exchange_produces_identical_mutual_keys() {
+        let pin = "741258";
+        let session = PairingSession::with_pin("test-watch".to_string(), pin.to_string(), 300);
+        let identity = ServerIdentity::generate();
+        let client_nonce = [0x77u8; 32];
+        let client_ephemeral_private = [0x55u8; 32];
+
+        let client_res = client_pake_exchange(
+            pin,
+            &session.salt,
+            &session.server_nonce,
+            &client_nonce,
+            &session.server_masked_pk,
+            &identity.fingerprint,
+            &client_ephemeral_private,
+        );
+
+        let server_keys = server_pake_exchange(
+            pin,
+            &session.salt,
+            &session.server_nonce,
+            &client_nonce,
+            &client_res.client_masked_pk,
+            &identity.fingerprint,
+            &session.server_ephemeral_private,
+        );
+
+        assert_eq!(client_res.client_proof, server_keys.client_proof);
+        assert_eq!(client_res.server_proof, server_keys.server_proof);
+        assert_eq!(client_res.shared_secret, server_keys.shared_secret);
     }
 }

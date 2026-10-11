@@ -808,8 +808,7 @@ impl ReceiverService {
     }
 
     pub fn set_pairing_pin(&self, pin: &str, ttl_secs: u64) -> PairingSession {
-        let mut session = PairingSession::new("galaxy-watch".to_string(), ttl_secs);
-        session.pin = pin.to_string();
+        let session = PairingSession::with_pin("galaxy-watch".to_string(), pin.to_string(), ttl_secs);
         let mut lock = self.active_pairing_session.lock().unwrap();
         *lock = Some(session.clone());
         session
@@ -1181,26 +1180,64 @@ mod tests {
             assert!(resp.contains("transfer-tcp-1"));
         }
 
-        // 3. Test POST /v1/pair and GET /v1/peers over real TCP socket
+        // 3. Test PAKE pairing flow and GET /v1/peers over real TCP socket
         {
             service.set_pairing_pin("654321", 300);
-            let pair_body = serde_json::to_vec(&serde_json::json!({
+            let init_body = serde_json::to_vec(&serde_json::json!({
                 "device_id": "watch-pin-test",
-                "device_name": "Galaxy Watch Ultra",
-                "pin": "654321"
             })).unwrap();
 
             let mut stream = std::net::TcpStream::connect(addr).unwrap();
             let req = format!(
-                "POST /v1/pair HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                addr, pair_body.len()
+                "POST /v1/pair/initiate HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                addr, init_body.len()
             );
             stream.write_all(req.as_bytes()).unwrap();
-            stream.write_all(&pair_body).unwrap();
-            let mut resp = String::new();
-            stream.read_to_string(&mut resp).unwrap();
-            assert!(resp.starts_with("HTTP/1.1 200 OK"), "Unexpected pair response: {}", resp);
-            assert!(resp.contains("\"status\":\"paired\""));
+            stream.write_all(&init_body).unwrap();
+            let mut init_resp = String::new();
+            stream.read_to_string(&mut init_resp).unwrap();
+            assert!(init_resp.starts_with("HTTP/1.1 200 OK"), "Unexpected init response: {}", init_resp);
+
+            let body_part = init_resp.split("\r\n\r\n").nth(1).unwrap();
+            let init_val: serde_json::Value = serde_json::from_str(body_part).unwrap();
+            let session_id = init_val["session_id"].as_str().unwrap();
+            let server_nonce = openwearsync_security::hex_to_32(init_val["server_nonce_hex"].as_str().unwrap()).unwrap();
+            let salt = openwearsync_security::hex_to_32(init_val["salt_hex"].as_str().unwrap()).unwrap();
+            let server_masked_pk = openwearsync_security::hex_to_32(init_val["server_masked_pk_hex"].as_str().unwrap()).unwrap();
+            let server_fingerprint = init_val["server_fingerprint"].as_str().unwrap();
+
+            let client_nonce = [0x77u8; 32];
+            let client_ephemeral_private = [0x55u8; 32];
+            let client_res = openwearsync_security::client_pake_exchange(
+                "654321",
+                &salt,
+                &server_nonce,
+                &client_nonce,
+                &server_masked_pk,
+                server_fingerprint,
+                &client_ephemeral_private,
+            );
+
+            let confirm_body = serde_json::to_vec(&serde_json::json!({
+                "session_id": session_id,
+                "device_id": "watch-pin-test",
+                "device_name": "Galaxy Watch Ultra",
+                "client_nonce_hex": openwearsync_security::bytes_to_hex(&client_nonce),
+                "client_masked_pk_hex": openwearsync_security::bytes_to_hex(&client_res.client_masked_pk),
+                "client_proof_hex": openwearsync_security::bytes_to_hex(&client_res.client_proof),
+            })).unwrap();
+
+            let mut stream_confirm = std::net::TcpStream::connect(addr).unwrap();
+            let req_confirm = format!(
+                "POST /v1/pair/confirm HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                addr, confirm_body.len()
+            );
+            stream_confirm.write_all(req_confirm.as_bytes()).unwrap();
+            stream_confirm.write_all(&confirm_body).unwrap();
+            let mut conf_resp = String::new();
+            stream_confirm.read_to_string(&mut conf_resp).unwrap();
+            assert!(conf_resp.starts_with("HTTP/1.1 200 OK"), "Unexpected confirm response: {}", conf_resp);
+            assert!(conf_resp.contains("\"status\":\"paired\""));
 
             // Check GET /v1/peers
             let mut stream2 = std::net::TcpStream::connect(addr).unwrap();

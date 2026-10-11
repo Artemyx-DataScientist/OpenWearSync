@@ -200,13 +200,16 @@ fun OpenWearSyncWearApp(
                                 pairedSecretHex = res.sharedSecretHex
                                 pinnedFingerprint = res.serverFingerprint
                                 pairingErrorMessage = null
-                                credentialsStore?.savePairing(
+                                val saved = credentialsStore?.savePairing(
                                     deviceId = "galaxy-watch-wearos",
                                     sharedSecretHex = res.sharedSecretHex,
                                     serverFingerprint = res.serverFingerprint ?: "",
                                     host = receiverEndpoint.host,
                                     port = receiverEndpoint.port,
-                                )
+                                ) ?: true
+                                if (!saved) {
+                                    pairingErrorMessage = "Failed to securely store credentials in Keystore"
+                                }
                             } else {
                                 isPaired = false
                                 pairingErrorMessage = res.error ?: "Pairing failed"
