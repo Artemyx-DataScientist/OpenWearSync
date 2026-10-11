@@ -1,17 +1,18 @@
-//! Windows receiver network listener and HTTP protocol dispatcher.
+//! Windows receiver TLS network listener and HTTPS protocol dispatcher.
 
 use crate::ReceiverService;
 use openwearsync_protocol::{
     ChunkDescriptor, CommitRequest, CreateTransferRequest, ErrorCode, ProtocolError,
     ReconcileRequest, Request, StatusRequest, UploadChunkRequest, MAX_FRAME_BYTES,
 };
-use openwearsync_security::AuthToken;
+use openwearsync_security::{AuthToken, tls::{TlsStream, ServerConnection}};
+type Connection = BufReader<TlsStream<ServerConnection, TcpStream>>;
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     thread::{self, JoinHandle},
@@ -20,7 +21,7 @@ use std::{
 
 // START_MODULE_CONTRACT
 // PURPOSE: Windows receiver network listener and HTTP/1.1 protocol dispatcher.
-// SCOPE: TCP listening, HTTP framing, authentication extraction, REST route dispatch, and graceful shutdown.
+// SCOPE: TLS-only listening, bounded connections and HTTP framing, authentication extraction, REST route dispatch, and shutdown.
 // DEPENDS: openwearsync-protocol, openwearsync-security, openwearsync-receiver
 // LINKS: M-WINDOWS-RECEIVER, V-M-WINDOWS-RECEIVER, DF-ENCRYPTED-CHUNK-UPLOAD, DF-RECORDING-MANIFEST
 // END_MODULE_CONTRACT
@@ -56,6 +57,23 @@ impl ServerHandle {
 pub struct HttpServer {
     listener: TcpListener,
     service: Arc<ReceiverService>,
+    connections: Arc<AtomicUsize>,
+}
+
+struct ConnectionLease(Arc<AtomicUsize>);
+impl Drop for ConnectionLease {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+}
+fn spawn_connection(stream: TcpStream, service: Arc<ReceiverService>, connections: &Arc<AtomicUsize>) {
+    // Bound unauthenticated TLS handshakes as well as established application requests.
+    if connections.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 32).then_some(n + 1)).is_err() {
+        return;
+    }
+    let lease = ConnectionLease(connections.clone());
+    let _ = thread::Builder::new().name("ows-https".into()).spawn(move || {
+        let _lease = lease;
+        let _ = handle_connection(stream, &service);
+    });
 }
 
 impl HttpServer {
@@ -68,7 +86,7 @@ impl HttpServer {
     pub fn bind(addr: &str, service: Arc<ReceiverService>) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         listener.set_nonblocking(false)?;
-        Ok(Self { listener, service })
+        Ok(Self { listener, service, connections: Arc::new(AtomicUsize::new(0)) })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -92,10 +110,7 @@ impl HttpServer {
                         if !running_clone.load(Ordering::SeqCst) {
                             break;
                         }
-                        let service = self.service.clone();
-                        thread::spawn(move || {
-                            let _ = handle_connection(stream, &service);
-                        });
+                        spawn_connection(stream, self.service.clone(), &self.connections);
                     }
                     Err(_) => {
                         thread::sleep(Duration::from_millis(10));
@@ -116,10 +131,7 @@ impl HttpServer {
         for stream in self.listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let service = self.service.clone();
-                    thread::spawn(move || {
-                        let _ = handle_connection(stream, &service);
-                    });
+                    spawn_connection(stream, self.service.clone(), &self.connections);
                 }
                 Err(e) => {
                     eprintln!("accept error: {}", e);
@@ -132,27 +144,11 @@ impl HttpServer {
 
 /// Helper parsing hex bytes
 fn parse_hex_32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        let byte_str = &s[i * 2..i * 2 + 2];
-        out[i] = u8::from_str_radix(byte_str, 16).ok()?;
-    }
-    Some(out)
+    openwearsync_security::hex_to_32(s)
 }
 
 fn parse_hex_16(s: &str) -> Option<[u8; 16]> {
-    if s.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 16];
-    for i in 0..16 {
-        let byte_str = &s[i * 2..i * 2 + 2];
-        out[i] = u8::from_str_radix(byte_str, 16).ok()?;
-    }
-    Some(out)
+    openwearsync_security::hex_to_16(s)
 }
 
 fn extract_auth_token(headers: &HashMap<String, String>) -> Option<AuthToken> {
@@ -182,7 +178,7 @@ fn extract_auth_token(headers: &HashMap<String, String>) -> Option<AuthToken> {
     })
 }
 
-fn send_response(mut stream: TcpStream, status_code: u16, status_text: &str, body: &[u8], content_type: &str) {
+fn send_response(mut stream: Connection, status_code: u16, status_text: &str, body: &[u8], content_type: &str) {
     let response_headers = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_code,
@@ -190,12 +186,12 @@ fn send_response(mut stream: TcpStream, status_code: u16, status_text: &str, bod
         content_type,
         body.len()
     );
-    let _ = stream.write_all(response_headers.as_bytes());
-    let _ = stream.write_all(body);
-    let _ = stream.flush();
+    let _ = stream.get_mut().write_all(response_headers.as_bytes());
+    let _ = stream.get_mut().write_all(body);
+    let _ = stream.get_mut().flush();
 }
 
-fn send_error(stream: TcpStream, error: ProtocolError) {
+fn send_error(stream: Connection, error: ProtocolError) {
     let status_code = match error.code {
         ErrorCode::InvalidRequest | ErrorCode::InvalidFrame | ErrorCode::InvalidManifest | ErrorCode::InvalidChunk => 400,
         ErrorCode::TransferNotFound => 404,
@@ -212,16 +208,17 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
 
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let tls = ServerConnection::new(service.tls_config()).map_err(std::io::Error::other)?;
+    let mut stream = BufReader::new(TlsStream::new(tls, stream));
 
     // Read request line
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
+    if (&mut stream).take(8193).read_line(&mut request_line)? == 0 {
         return Ok(());
     }
 
     let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
-    if parts.len() < 2 {
+    if parts.len() < 2 || request_line.len() > 8192 {
         send_response(stream, 400, "Bad Request", b"Malformed request line", "text/plain");
         return Ok(());
     }
@@ -231,10 +228,16 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
 
     // Read headers
     let mut headers = HashMap::new();
+    let mut header_count = 0;
     loop {
         let mut header_line = String::new();
-        if reader.read_line(&mut header_line)? == 0 {
+        if (&mut stream).take(8193).read_line(&mut header_line)? == 0 {
             break;
+        }
+        header_count += 1;
+        if header_line.len() > 8192 || header_count > 64 {
+            send_response(stream, 400, "Bad Request", b"Headers exceed bounds", "text/plain");
+            return Ok(());
         }
         let trimmed = header_line.trim();
         if trimmed.is_empty() {
@@ -258,7 +261,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
     // Read body
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader.read_exact(&mut body)?;
+        stream.read_exact(&mut body)?;
     }
 
     // Routing
@@ -308,7 +311,12 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         }
 
         let req_opt: Option<CreateSessionReq> = serde_json::from_slice(&body).ok();
-        let ttl = req_opt.as_ref().and_then(|r| r.ttl_secs).unwrap_or(300);
+        let ttl = req_opt.as_ref().and_then(|r| r.ttl_secs).unwrap_or(300).clamp(1, 300);
+        if let Some(pin) = req_opt.as_ref().and_then(|r| r.pin.as_ref()) {
+            if pin.len() != 6 || !pin.bytes().all(|b| b.is_ascii_digit()) {
+                send_response(stream, 400, "Bad Request", b"PIN must have six digits", "text/plain"); return Ok(());
+            }
+        }
         let session = if let Some(pin) = req_opt.as_ref().and_then(|r| r.pin.as_ref()) {
             service.set_pairing_pin(pin, ttl)
         } else {
@@ -325,186 +333,32 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         return Ok(());
     }
 
-    if method == "POST" && path == "/v1/pair/initiate" {
-        #[allow(dead_code)]
+    if method == "POST" && path == "/v1/pair/enroll" {
         #[derive(serde::Deserialize)]
-        struct InitiateReq {
-            device_id: String,
-            #[serde(default)]
-            client_nonce_hex: String,
+        #[serde(deny_unknown_fields)]
+        struct Enroll { device_id: String, device_name: String, pin: String }
+        let enrollment: Enroll = match serde_json::from_slice(&body) {
+            Ok(e) => e,
+            Err(_) => { send_response(stream, 400, "Bad Request", b"Invalid enrollment", "text/plain"); return Ok(()); }
+        };
+        if enrollment.device_id.is_empty() || enrollment.device_id.len() > 128 ||
+            !enrollment.device_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') ||
+            enrollment.device_name.len() > 128 || enrollment.pin.len() != 6 || !enrollment.pin.bytes().all(|b| b.is_ascii_digit()) {
+            send_response(stream, 400, "Bad Request", b"Invalid enrollment fields", "text/plain"); return Ok(());
         }
-        #[derive(serde::Serialize)]
-        struct InitiateResp {
-            session_id: String,
-            server_nonce_hex: String,
-            salt_hex: String,
-            server_masked_pk_hex: String,
-            server_public_key_hex: String,
-            server_fingerprint: String,
-        }
-
-        let init_req: InitiateReq = match serde_json::from_slice(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                send_response(stream, 400, "Bad Request", format!("invalid json: {}", e).as_bytes(), "text/plain");
-                return Ok(());
+        match service.enroll_with_pin(&enrollment.device_id, &enrollment.device_name, &enrollment.pin) {
+            Ok(peer) => {
+                let response = serde_json::json!({"status":"paired", "credential_version":2,
+                    "shared_secret_hex":openwearsync_security::bytes_to_hex(&peer.shared_secret), "server_fingerprint":service.server_fingerprint()});
+                send_response(stream, 200, "OK", &serde_json::to_vec(&response).unwrap(), "application/json");
             }
-        };
-
-        if let Err(e) = service.limiter().check_allowed(&init_req.device_id) {
-            send_error(stream, e);
-            return Ok(());
+            Err(_) => send_response(stream, 401, "Unauthorized", b"Invalid, consumed, expired or locked pairing session", "text/plain"),
         }
-
-        let active_session = match service.get_active_pairing_session() {
-            Some(s) if !s.is_expired() => s,
-            _ => {
-                send_response(
-                    stream,
-                    403,
-                    "Forbidden",
-                    b"{\"error\":\"no active pairing session; initiate pairing on Windows first\"}",
-                    "application/json",
-                );
-                return Ok(());
-            }
-        };
-
-        let identity = service.server_identity();
-        let resp = InitiateResp {
-            session_id: active_session.session_id,
-            server_nonce_hex: openwearsync_security::bytes_to_hex(&active_session.server_nonce),
-            salt_hex: openwearsync_security::bytes_to_hex(&active_session.salt),
-            server_masked_pk_hex: openwearsync_security::bytes_to_hex(&active_session.server_masked_pk),
-            server_public_key_hex: openwearsync_security::bytes_to_hex(&identity.public_key),
-            server_fingerprint: identity.fingerprint,
-        };
-        let json = serde_json::to_vec(&resp).unwrap();
-        send_response(stream, 200, "OK", &json, "application/json");
-        return Ok(());
-    }
-
-    if method == "POST" && path == "/v1/pair/confirm" {
-        #[derive(serde::Deserialize)]
-        struct ConfirmReq {
-            session_id: String,
-            device_id: String,
-            device_name: String,
-            client_nonce_hex: String,
-            #[serde(default)]
-            client_masked_pk_hex: String,
-            client_proof_hex: String,
-        }
-        #[derive(serde::Serialize)]
-        struct ConfirmResp {
-            status: String,
-            device_id: String,
-            server_proof_hex: String,
-            server_fingerprint: String,
-        }
-
-        let confirm_req: ConfirmReq = match serde_json::from_slice(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                send_response(stream, 400, "Bad Request", format!("invalid json: {}", e).as_bytes(), "text/plain");
-                return Ok(());
-            }
-        };
-
-        if let Err(e) = service.limiter().check_allowed(&confirm_req.device_id) {
-            send_error(stream, e);
-            return Ok(());
-        }
-
-        let active_session = match service.get_active_pairing_session() {
-            Some(s) if s.session_id == confirm_req.session_id && !s.is_expired() => s,
-            _ => {
-                send_response(
-                    stream,
-                    403,
-                    "Forbidden",
-                    b"{\"error\":\"invalid or expired pairing session\"}",
-                    "application/json",
-                );
-                return Ok(());
-            }
-        };
-
-        let client_nonce = match openwearsync_security::hex_to_32(&confirm_req.client_nonce_hex) {
-            Some(n) => n,
-            None => {
-                send_response(stream, 400, "Bad Request", b"invalid client_nonce_hex", "text/plain");
-                return Ok(());
-            }
-        };
-
-        let client_proof = match openwearsync_security::hex_to_32(&confirm_req.client_proof_hex) {
-            Some(p) => p,
-            None => {
-                send_response(stream, 400, "Bad Request", b"invalid client_proof_hex", "text/plain");
-                return Ok(());
-            }
-        };
-
-        let identity = service.server_identity();
-        let pake_keys = if let Some(client_masked_pk) = openwearsync_security::hex_to_32(&confirm_req.client_masked_pk_hex) {
-            openwearsync_security::server_pake_exchange(
-                &active_session.pin,
-                &active_session.salt,
-                &active_session.server_nonce,
-                &client_nonce,
-                &client_masked_pk,
-                &identity.fingerprint,
-                &active_session.server_ephemeral_private,
-            )
-        } else {
-            openwearsync_security::derive_pake_keys(
-                &active_session.pin,
-                &active_session.salt,
-                &active_session.server_nonce,
-                &client_nonce,
-                &confirm_req.device_id,
-                &identity.fingerprint,
-            )
-        };
-
-        if !openwearsync_security::constant_time_eq_32(&client_proof, &pake_keys.client_proof) {
-            let _ = service.limiter().record_failure(&confirm_req.device_id);
-            send_response(stream, 401, "Unauthorized", b"{\"error\":\"invalid pairing proof\"}", "application/json");
-            return Ok(());
-        }
-
-        let _ = service.consume_pairing_session();
-        service.limiter().record_success(&confirm_req.device_id);
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        if let Err(e) = service.enroll_peer(openwearsync_security::PairedPeer {
-            device_id: confirm_req.device_id.clone(),
-            device_name: confirm_req.device_name,
-            shared_secret: pake_keys.shared_secret,
-            enrolled_at_epoch_s: now,
-            revoked: false,
-        }) {
-            send_error(stream, e);
-            return Ok(());
-        }
-
-        let resp = ConfirmResp {
-            status: "paired".to_string(),
-            device_id: confirm_req.device_id,
-            server_proof_hex: openwearsync_security::bytes_to_hex(&pake_keys.server_proof),
-            server_fingerprint: identity.fingerprint,
-        };
-        let json = serde_json::to_vec(&resp).unwrap();
-        send_response(stream, 200, "OK", &json, "application/json");
         return Ok(());
     }
 
     if method == "GET" && path == "/v1/peers" {
+        if !is_loopback { send_response(stream, 403, "Forbidden", b"Local administration only", "text/plain"); return Ok(()); }
         #[derive(serde::Serialize)]
         struct SafePeerDto {
             device_id: String,
@@ -549,6 +403,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
     }
 
     if method == "GET" && path == "/v1/transfers" {
+        if !is_loopback { send_response(stream, 403, "Forbidden", b"Local administration only", "text/plain"); return Ok(()); }
         let transfers = service.store().ledger().list_transfers();
         let json = serde_json::to_vec(&transfers).unwrap_or_default();
         send_response(stream, 200, "OK", &json, "application/json");
@@ -649,7 +504,7 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             let sha_opt = headers.get("x-chunk-sha256").and_then(|s| parse_hex_32(s));
             let chunk_sha = match sha_opt {
                 Some(s) => s,
-                None => openwearsync_transfer_core::hash_sha256(&final_body),
+                None => { send_response(stream, 400, "Bad Request", b"Plaintext SHA-256 is required", "text/plain"); return Ok(()); },
             };
 
             let chunk_desc = match ChunkDescriptor::new(offset, final_body.len() as u32, chunk_sha) {

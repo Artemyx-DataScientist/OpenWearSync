@@ -1,5 +1,7 @@
 package com.openwearsync.wear
 
+import androidx.compose.foundation.border
+
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -185,6 +187,7 @@ fun OpenWearSyncWearApp(
                     pinnedFingerprint = pinnedFingerprint,
                     errorMessage = pairingErrorMessage,
                     onPinChange = { pairingPin = it },
+                    onFingerprintChange = { pinnedFingerprint = it },
                     onEndpointChange = { receiverEndpoint = it },
                     onPair = {
                         thread {
@@ -196,19 +199,22 @@ fun OpenWearSyncWearApp(
                                 pinnedFingerprint = pinnedFingerprint,
                             )
                             if (res.success && res.sharedSecretHex != null) {
-                                isPaired = true
-                                pairedSecretHex = res.sharedSecretHex
-                                pinnedFingerprint = res.serverFingerprint
-                                pairingErrorMessage = null
                                 val saved = credentialsStore?.savePairing(
                                     deviceId = "galaxy-watch-wearos",
                                     sharedSecretHex = res.sharedSecretHex,
                                     serverFingerprint = res.serverFingerprint ?: "",
                                     host = receiverEndpoint.host,
                                     port = receiverEndpoint.port,
-                                ) ?: true
-                                if (!saved) {
-                                    pairingErrorMessage = "Failed to securely store credentials in Keystore"
+                                ) ?: false
+                                if (saved) {
+                                    isPaired = true
+                                    pairedSecretHex = res.sharedSecretHex
+                                    pinnedFingerprint = res.serverFingerprint
+                                    pairingErrorMessage = null
+                                } else {
+                                    isPaired = false
+                                    pairedSecretHex = null
+                                    pairingErrorMessage = "Failed to securely store credentials in Keystore; pair again after fixing storage"
                                 }
                             } else {
                                 isPaired = false
@@ -445,6 +451,7 @@ fun PairingScreen(
     pinnedFingerprint: String? = null,
     errorMessage: String? = null,
     onPinChange: (String) -> Unit,
+    onFingerprintChange: (String) -> Unit,
     onEndpointChange: (ReceiverEndpoint) -> Unit,
     onPair: () -> Unit,
     onUnpair: () -> Unit,
@@ -496,6 +503,16 @@ fun PairingScreen(
                 }
             }
         } else {
+            item {
+                Text("Full certificate SHA-256 from PC:", fontSize = 9.sp, color = Color.White)
+                androidx.compose.foundation.text.BasicTextField(
+                    value = pinnedFingerprint ?: "",
+                    onValueChange = { value -> onFingerprintChange(value.filter { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }.take(64).lowercase()) },
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 9.sp),
+                    modifier = Modifier.width(164.dp).border(1.dp, Color(0xFF64748B)).padding(5.dp),
+                )
+                Text("Obtain this from the trusted PC before entering PIN.", fontSize = 8.sp, color = Color(0xFF94A3B8))
+            }
             // Interactive 6-digit PIN Keypad
             item {
                 Text("Enter PC PIN:", fontSize = 9.sp, color = Color.White)
@@ -571,7 +588,7 @@ fun PairingScreen(
                         shape = CircleShape,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                        enabled = pin.length == 6,
+                        enabled = pin.length == 6 && pinnedFingerprint?.matches(Regex("[0-9a-fA-F]{64}")) == true,
                     ) {
                         Text("Connect", fontSize = 9.sp)
                     }

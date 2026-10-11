@@ -37,16 +37,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ledger = DurableTransferLedger::open(&ledger_path)?;
     let store = Arc::new(DurableFileStore::new(staging_dir, dest_dir, ledger)?);
     let registry = Arc::new(PairedPeerRegistry::new());
-    let service = Arc::new(ReceiverService::new(store, registry, 4));
+    let service = Arc::new(ReceiverService::try_new(store, registry, 4)?);
 
     let port = env::var("OPENWEARSYNC_PORT").unwrap_or_else(|_| "35659".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
 
-    let session = service.start_pairing_session(None, 3600);
-    println!("Initial pairing session active for 60 min. PIN: {}", session.pin);
+    let session = service.start_pairing_session(None, 300);
+    println!("Certificate SHA-256 (enter on watch before PIN): {}", service.server_fingerprint());
+    println!("Initial one-use pairing session active for 5 min. PIN: {}", session.pin);
 
     let server = HttpServer::bind(&bind_addr, service)?;
-    println!("Listening for incoming Galaxy Watch transfers on http://{}", bind_addr);
+    println!("Listening for incoming Galaxy Watch transfers on https://{}", bind_addr);
     println!("Press Ctrl+C to terminate.");
 
     server.run()?;

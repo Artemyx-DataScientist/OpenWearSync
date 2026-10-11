@@ -6,6 +6,14 @@ license.workspace = true
 
 [lib]
 
+[features]
+integration-harness = []
+
+[[bin]]
+name = "receiver_test_harness"
+path = "src/bin/receiver_test_harness.rs"
+required-features = ["integration-harness"]
+
 [dependencies]
 openwearsync-protocol = { path = "../protocol" }
 openwearsync-security = { path = "../security" }

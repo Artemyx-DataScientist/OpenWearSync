@@ -247,34 +247,22 @@ pub extern "C" fn native_destroy_session(handle: *mut NativeSessionHandle) -> i3
     ERROR_OK
 }
 
-// Native HTTP and TCP socket transport executed in Rust
+// Pinned HTTPS socket transport executed in Rust.
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-pub fn execute_http_request(
+pub fn execute_https_request(
     host: &str,
     port: u16,
+    certificate_pin: &str,
     method: &str,
     path: &str,
     headers: &[(&str, &str)],
     body: &[u8],
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), i32> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addrs = addr.to_socket_addrs().map_err(|_| ERROR_NETWORK_FAILED)?;
-    let mut stream_opt = None;
-
-    for sa in socket_addrs {
-        if let Ok(s) = TcpStream::connect_timeout(&sa, timeout) {
-            stream_opt = Some(s);
-            break;
-        }
-    }
-
-    let mut stream = stream_opt.ok_or(ERROR_NETWORK_FAILED)?;
-    stream.set_read_timeout(Some(timeout)).map_err(|_| ERROR_NETWORK_FAILED)?;
-    stream.set_write_timeout(Some(timeout)).map_err(|_| ERROR_NETWORK_FAILED)?;
+    let mut stream = openwearsync_security::tls::connect_pinned(host, port, certificate_pin, timeout)
+        .map_err(|_| ERROR_NETWORK_FAILED)?;
 
     let mut req = format!(
         "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -293,16 +281,20 @@ pub fn execute_http_request(
 
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).map_err(|_| ERROR_NETWORK_FAILED)?;
+    (&mut reader).take(8193).read_line(&mut status_line).map_err(|_| ERROR_NETWORK_FAILED)?;
+    if status_line.len() > 8192 { return Err(ERROR_NETWORK_FAILED); }
     let parts: Vec<&str> = status_line.split_whitespace().collect();
     let status_code = parts.get(1).and_then(|c| c.parse::<u16>().ok()).unwrap_or(0);
 
     let mut content_length = 0usize;
+    let mut header_count = 0;
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).map_err(|_| ERROR_NETWORK_FAILED)? == 0 {
+        if (&mut reader).take(8193).read_line(&mut line).map_err(|_| ERROR_NETWORK_FAILED)? == 0 {
             break;
         }
+        header_count += 1;
+        if line.len() > 8192 || header_count > 64 { return Err(ERROR_NETWORK_FAILED); }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             break;
@@ -314,11 +306,12 @@ pub fn execute_http_request(
         }
     }
 
+    if content_length > openwearsync_protocol::MAX_FRAME_BYTES as usize { return Err(ERROR_NETWORK_FAILED); }
     let mut resp_body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut resp_body).map_err(|_| ERROR_NETWORK_FAILED)?;
     } else {
-        let _ = reader.read_to_end(&mut resp_body);
+        return Err(ERROR_NETWORK_FAILED);
     }
 
     Ok((status_code, resp_body))
@@ -341,17 +334,6 @@ pub struct JniEnvTable {
 }
 
 pub type JniEnv = *const JniEnvTable;
-
-unsafe fn jstring_to_string(env: *mut JniEnv, jstr: *mut ()) -> Option<String> {
-    if jstr.is_null() || env.is_null() { return None; }
-    let table = **env;
-    let ptr = (table.get_string_utf_chars)(env, jstr, std::ptr::null_mut());
-    if ptr.is_null() { return None; }
-    let cstr = std::ffi::CStr::from_ptr(ptr);
-    let s = cstr.to_string_lossy().into_owned();
-    (table.release_string_utf_chars)(env, jstr, ptr);
-    Some(s)
-}
 
 unsafe fn jbyte_array_to_vec(env: *mut JniEnv, jarr: *mut ()) -> Option<Vec<u8>> {
     if jarr.is_null() || env.is_null() { return None; }
@@ -385,26 +367,6 @@ pub extern "C" fn native_compute_sha256(
     let hash = openwearsync_transfer_core::hash_sha256(data);
     unsafe {
         std::ptr::copy_nonoverlapping(hash.as_ptr(), out_sha_ptr, 32);
-    }
-    ERROR_OK
-}
-
-#[no_mangle]
-pub extern "C" fn native_derive_secret(
-    pin_ptr: *const u8,
-    pin_len: usize,
-    device_id_ptr: *const u8,
-    device_id_len: usize,
-    out_secret_ptr: *mut u8,
-) -> i32 {
-    if pin_ptr.is_null() || device_id_ptr.is_null() || out_secret_ptr.is_null() {
-        return ERROR_INVALID_ARGUMENT;
-    }
-    let pin = unsafe { std::slice::from_raw_parts(pin_ptr, pin_len) };
-    let device_id = unsafe { std::slice::from_raw_parts(device_id_ptr, device_id_len) };
-    let secret = openwearsync_security::hmac_sha256(pin, device_id);
-    unsafe {
-        std::ptr::copy_nonoverlapping(secret.as_ptr(), out_secret_ptr, 32);
     }
     ERROR_OK
 }
@@ -496,220 +458,33 @@ pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeD
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeUploadChunkSocket(
-    env: *mut JniEnv,
-    _class: *mut (),
-    handle: i64,
-    host_jstr: *mut (),
-    port: i32,
-    transfer_id_jstr: *mut (),
-    offset: i64,
-    chunk_data_jarr: *mut (),
-    is_encrypted: i32,
-    auth_header_jstr: *mut (),
-) -> i32 {
-    let session = handle as *mut NativeSessionHandle;
-    if session.is_null() {
-        return ERROR_INVALID_ARGUMENT;
-    }
-    if (*session).token.is_cancelled() {
-        return ERROR_CANCELLED;
-    }
-
-    let host = match jstring_to_string(env, host_jstr) {
-        Some(h) => h,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let transfer_id = match jstring_to_string(env, transfer_id_jstr) {
-        Some(t) => t,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let auth_header = match jstring_to_string(env, auth_header_jstr) {
-        Some(a) => a,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let chunk_data = match jbyte_array_to_vec(env, chunk_data_jarr) {
-        Some(d) => d,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-
-    let path = format!("/v1/transfers/{}/chunks/{}", transfer_id, offset);
-    let chunk_sha = openwearsync_transfer_core::hash_sha256(&chunk_data);
-    let sha_hex = openwearsync_security::bytes_to_hex(&chunk_sha);
-
-    let mut headers = vec![
-        ("Content-Type", "application/octet-stream"),
-        ("Authorization", auth_header.as_str()),
-        ("x-chunk-sha256", sha_hex.as_str()),
-    ];
-    if is_encrypted != 0 {
-        headers.push(("x-encrypted", "true"));
-    }
-
-    match execute_http_request(&host, port as u16, "PUT", &path, &headers, &chunk_data, Duration::from_secs(10)) {
-        Ok((status, _)) => {
-            if status == 200 || status == 201 {
-                (*session).record_chunk(offset as u64, chunk_data.len() as u32);
-                status as i32
-            } else {
-                status as i32
-            }
-        }
-        Err(err_code) => err_code,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeCreateTransferSocket(
-    env: *mut JniEnv,
-    _class: *mut (),
-    host_jstr: *mut (),
-    port: i32,
-    manifest_json_jstr: *mut (),
-    auth_header_jstr: *mut (),
-) -> i32 {
-    let host = match jstring_to_string(env, host_jstr) {
-        Some(h) => h,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let manifest_json = match jstring_to_string(env, manifest_json_jstr) {
-        Some(m) => m,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let auth_header = match jstring_to_string(env, auth_header_jstr) {
-        Some(a) => a,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-
-    let headers = [
-        ("Content-Type", "application/json"),
-        ("Authorization", auth_header.as_str()),
-    ];
-
-    match execute_http_request(&host, port as u16, "POST", "/v1/transfers", &headers, manifest_json.as_bytes(), Duration::from_secs(10)) {
-        Ok((status, _)) => status as i32,
-        Err(err_code) => err_code,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeReconcileSocket(
-    env: *mut JniEnv,
-    _class: *mut (),
-    handle: i64,
-    host_jstr: *mut (),
-    port: i32,
-    transfer_id_jstr: *mut (),
-    auth_header_jstr: *mut (),
-) -> i32 {
-    let session = handle as *mut NativeSessionHandle;
-    let host = match jstring_to_string(env, host_jstr) {
-        Some(h) => h,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let transfer_id = match jstring_to_string(env, transfer_id_jstr) {
-        Some(t) => t,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let auth_header = match jstring_to_string(env, auth_header_jstr) {
-        Some(a) => a,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-
-    let path = format!("/v1/transfers/{}/reconcile", transfer_id);
-    let headers = [
-        ("Content-Type", "application/json"),
-        ("Authorization", auth_header.as_str()),
-    ];
-
-    match execute_http_request(&host, port as u16, "POST", &path, &headers, b"{}", Duration::from_secs(10)) {
-        Ok((status, body)) => {
-            if status == 200 {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
-                    if let Some(arr) = val.get("received").and_then(|r| r.as_array()) {
-                        if !session.is_null() {
-                            for chunk in arr {
-                                let offset = chunk.get("offset").and_then(|o| o.as_u64()).unwrap_or(0);
-                                let length = chunk.get("length").and_then(|l| l.as_u64()).unwrap_or(0) as u32;
-                                (*session).record_chunk(offset, length);
-                            }
-                        }
-                    }
-                }
-            }
-            status as i32
-        }
-        Err(err_code) => err_code,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeCommitSocket(
-    env: *mut JniEnv,
-    _class: *mut (),
-    host_jstr: *mut (),
-    port: i32,
-    transfer_id_jstr: *mut (),
-    auth_header_jstr: *mut (),
-) -> i32 {
-    let host = match jstring_to_string(env, host_jstr) {
-        Some(h) => h,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let transfer_id = match jstring_to_string(env, transfer_id_jstr) {
-        Some(t) => t,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-    let auth_header = match jstring_to_string(env, auth_header_jstr) {
-        Some(a) => a,
-        None => return ERROR_INVALID_ARGUMENT,
-    };
-
-    let path = format!("/v1/transfers/{}/commit", transfer_id);
-    let headers = [
-        ("Content-Type", "application/json"),
-        ("Authorization", auth_header.as_str()),
-    ];
-
-    match execute_http_request(&host, port as u16, "POST", &path, &headers, b"{}", Duration::from_secs(15)) {
-        Ok((status, _)) => status as i32,
-        Err(err_code) => err_code,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeDerivePakeKeys(
-    env: *mut JniEnv,
-    _class: *mut (),
-    pin_jstr: *mut (),
-    salt_hex_jstr: *mut (),
-    server_nonce_hex_jstr: *mut (),
-    client_nonce_hex_jstr: *mut (),
-    device_id_jstr: *mut (),
-    server_fingerprint_jstr: *mut (),
-    out_client_proof_jarr: *mut (),
-    out_server_proof_jarr: *mut (),
-    out_shared_secret_jarr: *mut (),
-) -> i32 {
-    let pin = match jstring_to_string(env, pin_jstr) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let salt_hex = match jstring_to_string(env, salt_hex_jstr) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let server_nonce_hex = match jstring_to_string(env, server_nonce_hex_jstr) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let client_nonce_hex = match jstring_to_string(env, client_nonce_hex_jstr) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let device_id = match jstring_to_string(env, device_id_jstr) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let server_fingerprint = match jstring_to_string(env, server_fingerprint_jstr) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-
-    let salt = match openwearsync_security::hex_to_32(&salt_hex) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let server_nonce = match openwearsync_security::hex_to_32(&server_nonce_hex) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-    let client_nonce = match openwearsync_security::hex_to_32(&client_nonce_hex) { Some(s) => s, None => return ERROR_INVALID_ARGUMENT };
-
-    let keys = openwearsync_security::derive_pake_keys(
-        &pin, &salt, &server_nonce, &client_nonce, &device_id, &server_fingerprint
-    );
-
-    copy_slice_to_jbyte_array(env, out_client_proof_jarr, &keys.client_proof);
-    copy_slice_to_jbyte_array(env, out_server_proof_jarr, &keys.server_proof);
-    copy_slice_to_jbyte_array(env, out_shared_secret_jarr, &keys.shared_secret);
-    ERROR_OK
+pub unsafe extern "system" fn Java_com_openwearsync_wear_NativeTransferBridge_nativeHttpsRequest(
+    mut env: jni::JNIEnv, _class: jni::objects::JClass,
+    host: jni::objects::JString, port: jni::sys::jint, pin: jni::objects::JString,
+    method: jni::objects::JString, path: jni::objects::JString, token: jni::objects::JString,
+    sha: jni::objects::JString, encrypted: jni::sys::jint, body: jni::objects::JByteArray,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<String, i32> {
+        let host: String = env.get_string(&host).map_err(|_| ERROR_INVALID_ARGUMENT)?.into();
+        let pin: String = env.get_string(&pin).map_err(|_| ERROR_INVALID_ARGUMENT)?.into();
+        let method: String = env.get_string(&method).map_err(|_| ERROR_INVALID_ARGUMENT)?.into();
+        let path: String = env.get_string(&path).map_err(|_| ERROR_INVALID_ARGUMENT)?.into();
+        let token: String = env.get_string(&token).map_err(|_| ERROR_INVALID_ARGUMENT)?.into();
+        let sha: String = env.get_string(&sha).map_err(|_| ERROR_INVALID_ARGUMENT)?.into();
+        let body = env.convert_byte_array(&body).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        if !(1..=65535).contains(&port) || !["GET", "POST", "PUT", "DELETE"].contains(&method.as_str()) ||
+            !path.starts_with("/v1/") || path.bytes().any(|b| b.is_ascii_whitespace()) ||
+            token.contains(['\r', '\n']) || (!sha.is_empty() && openwearsync_security::hex_to_32(&sha).is_none()) ||
+            body.len() > openwearsync_protocol::MAX_FRAME_BYTES as usize { return Err(ERROR_INVALID_ARGUMENT); }
+        let mut headers = vec![("Content-Type", if encrypted != 0 { "application/octet-stream" } else { "application/json" })];
+        if !token.is_empty() { headers.push(("Authorization", token.as_str())); }
+        if !sha.is_empty() { headers.push(("x-chunk-sha256", sha.as_str())); }
+        if encrypted != 0 { headers.push(("x-encrypted", "true")); }
+        let (status, response) = execute_https_request(&host, port as u16, &pin, &method, &path, &headers, &body, Duration::from_secs(10))?;
+        Ok(format!("{}\n{}", status, String::from_utf8(response).map_err(|_| ERROR_NETWORK_FAILED)?))
+    })();
+    let response = result.unwrap_or_else(|e| format!("{}\nNative request failed", e));
+    env.new_string(response).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
@@ -819,13 +594,6 @@ mod tests {
         let mut sha = [0u8; 32];
         assert_eq!(native_compute_sha256(data.as_ptr(), data.len(), sha.as_mut_ptr()), ERROR_OK);
         assert_eq!(sha, openwearsync_transfer_core::hash_sha256(data));
-
-        // Test native secret derivation
-        let pin = b"123456";
-        let dev = b"watch-1";
-        let mut secret = [0u8; 32];
-        assert_eq!(native_derive_secret(pin.as_ptr(), pin.len(), dev.as_ptr(), dev.len(), secret.as_mut_ptr()), ERROR_OK);
-        assert_eq!(secret, openwearsync_security::hmac_sha256(pin, dev));
 
         assert_eq!(native_destroy_session(handle), ERROR_OK);
     }

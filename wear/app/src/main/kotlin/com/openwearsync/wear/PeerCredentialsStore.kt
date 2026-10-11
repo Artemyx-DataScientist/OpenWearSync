@@ -7,10 +7,9 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 // START_MODULE_CONTRACT
-// PURPOSE: Persistent, hardware-backed Keystore-encrypted store for paired Windows receiver credentials and server fingerprint.
+// PURPOSE: Persistent Android Keystore-encrypted store for paired Windows receiver credentials and server fingerprint.
 // SCOPE: AndroidKeyStore AES/GCM encryption of device ID, shared secret hex, pinned server fingerprint, and receiver endpoint across app restarts.
 // DEPENDS: M-WEAR-SHELL, M-PAIRING-SECURITY
 // LINKS: M-WEAR-SHELL, M-PAIRING-SECURITY, V-M-PAIRING-SECURITY, DF-DISCOVERY-AND-PAIRING
@@ -29,9 +28,15 @@ data class PeerCredentials(
     val receiverPort: Int,
 )
 
-class PeerCredentialsStore(private val context: Context) {
+class PeerCredentialsStore private constructor(
+    private val preferences: () -> SharedPreferences,
+    private val keyProvider: (() -> SecretKey)?,
+) {
+    constructor(context: Context) : this({ context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }, null)
+    internal constructor(prefs: SharedPreferences, keyProvider: () -> SecretKey) : this({ prefs }, keyProvider)
+    @Volatile private var storageFailed = false
     private val prefs: SharedPreferences by lazy {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        preferences()
     }
 
     companion object {
@@ -47,19 +52,14 @@ class PeerCredentialsStore(private val context: Context) {
         private const val KEY_SERVER_FINGERPRINT_ENC = "server_fingerprint_enc"
         private const val KEY_RECEIVER_HOST = "receiver_host"
         private const val KEY_RECEIVER_PORT = "receiver_port"
-
-        // Obfuscation fallback key used strictly when AndroidKeyStore is unavailable (host JVM unit tests)
-        private val FALLBACK_KEY_BYTES = byteArrayOf(
-            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae.toByte(), 0xd2.toByte(), 0xa6.toByte(),
-            0xab.toByte(), 0xf7.toByte(), 0x15, 0x88.toByte(), 0x09, 0xcf.toByte(), 0x4f, 0x3c,
-            0x76, 0x2e, 0x65, 0x49, 0x23, 0x11, 0x8e.toByte(), 0x9f.toByte(),
-            0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70, 0x01
-        )
+        private const val KEY_VERSION = "credential_version"
+        private const val VERSION = 2
 
         private fun bytesToHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
         private fun hexToBytes(s: String): ByteArray {
             val trimmed = s.trim()
+            require(trimmed.length % 2 == 0 && trimmed.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' })
             val data = ByteArray(trimmed.length / 2)
             for (i in 0 until trimmed.length step 2) {
                 data[i / 2] = ((Character.digit(trimmed[i], 16) shl 4) + Character.digit(trimmed[i + 1], 16)).toByte()
@@ -69,7 +69,7 @@ class PeerCredentialsStore(private val context: Context) {
     }
 
     private fun getSecretKey(): SecretKey {
-        return try {
+            keyProvider?.let { return it() }
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
             if (!keyStore.containsAlias(KEYSTORE_ALIAS)) {
                 val keyGen = KeyGenerator.getInstance("AES", ANDROID_KEYSTORE)
@@ -85,11 +85,7 @@ class PeerCredentialsStore(private val context: Context) {
                 keyGen.init(spec)
                 keyGen.generateKey()
             }
-            (keyStore.getEntry(KEYSTORE_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
-        } catch (_: Throwable) {
-            // Graceful fallback for non-Android JVM environments
-            SecretKeySpec(FALLBACK_KEY_BYTES, "AES")
-        }
+            return (keyStore.getEntry(KEYSTORE_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
     }
 
     private fun encryptString(plaintext: String): String? {
@@ -97,7 +93,8 @@ class PeerCredentialsStore(private val context: Context) {
             val secretKey = getSecretKey()
             val cipher = Cipher.getInstance(AES_GCM_NO_PADDING)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-            val iv = cipher.iv ?: ByteArray(GCM_IV_LENGTH)
+            val iv = requireNotNull(cipher.iv)
+            require(iv.size == GCM_IV_LENGTH)
             val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
             val combined = ByteArray(iv.size + ciphertext.size)
             System.arraycopy(iv, 0, combined, 0, iv.size)
@@ -126,16 +123,17 @@ class PeerCredentialsStore(private val context: Context) {
     }
 
     fun isPaired(): Boolean {
-        val enc = prefs.getString(KEY_SHARED_SECRET_ENC, null)
-        return !enc.isNullOrEmpty()
+        return getCredentials() != null
     }
 
     fun getCredentials(): PeerCredentials? {
+        if (storageFailed || prefs.getInt(KEY_VERSION, 0) != VERSION) return null
         val deviceId = prefs.getString(KEY_DEVICE_ID, null) ?: return null
         val encSecret = prefs.getString(KEY_SHARED_SECRET_ENC, null) ?: return null
         val secret = decryptString(encSecret) ?: return null
-        val encFp = prefs.getString(KEY_SERVER_FINGERPRINT_ENC, "") ?: ""
-        val fingerprint = if (encFp.isNotEmpty()) decryptString(encFp) ?: "" else ""
+        val encFp = prefs.getString(KEY_SERVER_FINGERPRINT_ENC, null) ?: return null
+        val fingerprint = decryptString(encFp) ?: return null
+        if (!secret.matches(Regex("[0-9a-fA-F]{64}")) || !fingerprint.matches(Regex("[0-9a-fA-F]{64}"))) return null
         val host = prefs.getString(KEY_RECEIVER_HOST, "192.168.1.100") ?: "192.168.1.100"
         val port = prefs.getInt(KEY_RECEIVER_PORT, 35659)
         return PeerCredentials(
@@ -154,23 +152,36 @@ class PeerCredentialsStore(private val context: Context) {
         host: String,
         port: Int,
     ): Boolean {
+        if (!sharedSecretHex.matches(Regex("[0-9a-fA-F]{64}")) || !serverFingerprint.matches(Regex("[0-9a-fA-F]{64}"))) return false
         val encSecret = encryptString(sharedSecretHex) ?: return false
-        val encFp = if (serverFingerprint.isNotEmpty()) {
-            encryptString(serverFingerprint) ?: return false
-        } else {
-            ""
-        }
-        prefs.edit()
+        val encFp = encryptString(serverFingerprint) ?: return false
+        // Android updates its shared in-memory preferences even when durable commit fails.
+        // Restore this store's previous fields so a newly created store cannot accept the failed save.
+        val previousStrings = try { listOf(KEY_DEVICE_ID, KEY_SHARED_SECRET_ENC, KEY_SERVER_FINGERPRINT_ENC, KEY_RECEIVER_HOST)
+            .associateWith { prefs.getString(it, null) } } catch (_: Exception) { return false }
+        val previousVersion = prefs.getInt(KEY_VERSION, 0)
+        val previousPort = prefs.getInt(KEY_RECEIVER_PORT, 0)
+        val saved = try { prefs.edit()
+            .putInt(KEY_VERSION, VERSION)
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_SHARED_SECRET_ENC, encSecret)
             .putString(KEY_SERVER_FINGERPRINT_ENC, encFp)
             .putString(KEY_RECEIVER_HOST, host)
             .putInt(KEY_RECEIVER_PORT, port)
-            .apply()
-        return true
+            .commit() } catch (_: Exception) { false }
+        storageFailed = !saved
+        if (!saved) {
+            try {
+                val restore = prefs.edit().putInt(KEY_VERSION, previousVersion).putInt(KEY_RECEIVER_PORT, previousPort)
+                previousStrings.forEach { (key, value) -> restore.putString(key, value) }
+                restore.commit()
+            } catch (_: Exception) { /* The current instance remains closed after storage failure. */ }
+        }
+        return saved
     }
 
     fun clearPairing() {
         prefs.edit().clear().apply()
+        storageFailed = false
     }
 }

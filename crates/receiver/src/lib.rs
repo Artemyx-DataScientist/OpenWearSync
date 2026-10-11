@@ -8,7 +8,6 @@ use openwearsync_protocol::{
 };
 use openwearsync_security::{
     AuthToken, PairedPeer, PairedPeerRegistry, PairingSession, RateLimiter, ReplayFilter,
-    ServerIdentity,
 };
 use openwearsync_transfer_core::{hash_sha256, TransferReconciliation};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -458,45 +457,7 @@ impl DurableTransferLedger {
         Ok(updated > 0)
     }
 
-    pub fn get_or_create_server_identity(&self) -> ServerIdentity {
-        let conn = self.conn.lock().unwrap();
-        let existing: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT val FROM server_identity WHERE key = 'private_key'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .ok()
-            .flatten();
 
-        if let Some(priv_bytes) = existing {
-            if priv_bytes.len() == 32 {
-                let mut pk = [0u8; 32];
-                pk.copy_from_slice(&priv_bytes);
-                return ServerIdentity::from_private_key(pk);
-            }
-        }
-
-        let identity = ServerIdentity::generate();
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('private_key', ?1)",
-            params![&identity.private_key[..]],
-        );
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('public_key', ?1)",
-            params![&identity.public_key[..]],
-        );
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO server_identity (key, val) VALUES ('fingerprint', ?1)",
-            params![identity.fingerprint.as_bytes()],
-        );
-        identity
-    }
-
-    pub fn get_or_create_server_fingerprint(&self) -> String {
-        self.get_or_create_server_identity().fingerprint
-    }
 }
 
 
@@ -549,20 +510,15 @@ impl DurableFileStore {
         self.ledger.insert_transfer(manifest.clone())?;
 
         let staging_path = self.staging_file_path(&manifest.transfer_id);
-        let file = OpenOptions::new()
+        let _file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(&staging_path)
             .map_err(|e| ProtocolError {
                 code: ErrorCode::LimitExceeded,
                 message: format!("cannot open staging file: {}", e),
             })?;
-
-        // Pre-allocate or truncate
-        file.set_len(manifest.size_bytes).map_err(|e| ProtocolError {
-            code: ErrorCode::LimitExceeded,
-            message: format!("cannot pre-allocate staging file: {}", e),
-        })?;
 
         Ok(())
     }
@@ -728,6 +684,7 @@ impl DurableFileStore {
 
 /// Windows receiver service dispatching authenticated transfer requests.
 pub struct ReceiverService {
+    tls_identity: openwearsync_security::tls::TlsIdentity,
     store: Arc<DurableFileStore>,
     registry: Arc<PairedPeerRegistry>,
     limiter: RateLimiter,
@@ -749,13 +706,19 @@ impl ReceiverService {
         registry: Arc<PairedPeerRegistry>,
         max_concurrent_transfers: usize,
     ) -> Self {
+        Self::try_new(store, registry, max_concurrent_transfers).expect("Protected TLS identity unavailable")
+    }
+
+    pub fn try_new(store: Arc<DurableFileStore>, registry: Arc<PairedPeerRegistry>, max_concurrent_transfers: usize) -> std::io::Result<Self> {
+        let tls_identity = openwearsync_security::tls::TlsIdentity::load_or_create(store.staging_dir.parent().ok_or_else(|| std::io::Error::other("Missing receiver data root"))?)?;
         if let Ok(peers) = store.ledger().load_peers() {
             for peer in peers {
                 registry.enroll(peer);
             }
         }
 
-        Self {
+        Ok(Self {
+            tls_identity,
             store,
             registry,
             limiter: RateLimiter::new(5, Duration::from_secs(60)),
@@ -763,7 +726,7 @@ impl ReceiverService {
             max_concurrent_transfers,
             active_transfers: Arc::new(Mutex::new(HashSet::new())),
             active_pairing_session: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     pub fn enroll_peer(&self, peer: PairedPeer) -> ProtocolResult<()> {
@@ -777,12 +740,12 @@ impl ReceiverService {
         self.registry.revoke(device_id)
     }
 
-    pub fn server_identity(&self) -> ServerIdentity {
-        self.store.ledger().get_or_create_server_identity()
+    pub fn server_fingerprint(&self) -> String {
+        self.tls_identity.fingerprint.clone()
     }
 
-    pub fn server_fingerprint(&self) -> String {
-        self.store.ledger().get_or_create_server_fingerprint()
+    pub fn tls_config(&self) -> std::sync::Arc<openwearsync_security::tls::ServerConfig> {
+        self.tls_identity.config.clone()
     }
 
     pub fn registry(&self) -> &PairedPeerRegistry {
@@ -832,6 +795,22 @@ impl ReceiverService {
     pub fn consume_pairing_session(&self) -> Option<PairingSession> {
         let mut lock = self.active_pairing_session.lock().unwrap();
         lock.take()
+    }
+
+    /// Check and consume one enrollment session atomically. Attempts are session-wide, independent of device IDs.
+    pub fn enroll_with_pin(&self, device_id: &str, device_name: &str, pin: &str) -> ProtocolResult<PairedPeer> {
+        let mut active = self.active_pairing_session.lock().unwrap();
+        let session = active.as_mut().ok_or_else(|| ProtocolError { code: ErrorCode::InvalidRequest, message: "No active pairing session".into() })?;
+        if !session.check_pin(pin) {
+            return Err(ProtocolError { code: ErrorCode::InvalidRequest, message: "Invalid, expired or locked pairing PIN".into() });
+        }
+        let peer = PairedPeer { device_id: device_id.to_owned(), device_name: device_name.to_owned(),
+            shared_secret: openwearsync_security::generate_random_bytes_32(),
+            enrolled_at_epoch_s: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(), revoked: false };
+        // Keep the session locked until durable enrollment succeeds; no concurrent double consumption.
+        self.enroll_peer(peer.clone())?;
+        *active = None;
+        Ok(peer)
     }
 
     /// Authenticate request from a paired peer token.
@@ -1117,139 +1096,25 @@ mod tests {
     }
 
     #[test]
-    fn http_server_handles_network_requests_over_real_tcp() {
+    fn service_pairing_is_atomic_one_use_and_session_rate_limited() {
         let temp = tempdir().unwrap();
-        let ledger = DurableTransferLedger::open(temp.path().join("ledger.db")).unwrap();
-        let store = Arc::new(DurableFileStore::new(
-            temp.path().join("staging"),
-            temp.path().join("dest"),
-            ledger,
-        ).unwrap());
-
-        let registry = Arc::new(PairedPeerRegistry::new());
-        let device_secret = [0x42u8; 32];
-        registry.enroll(PairedPeer {
-            device_id: "test-watch".to_string(),
-            device_name: "Watch Test".to_string(),
-            shared_secret: device_secret,
-            enrolled_at_epoch_s: 1700000000,
-            revoked: false,
-        });
-
-        let service = Arc::new(ReceiverService::new(store, registry, 4));
-        let server = HttpServer::bind("127.0.0.1:0", service.clone()).unwrap();
-        let handle = server.start_background().unwrap();
-        let addr = handle.local_addr();
-
-        // 1. Test GET /v1/status over real TCP socket
-        {
-            let mut stream = std::net::TcpStream::connect(addr).unwrap();
-            let req = format!("GET /v1/status HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", addr);
-            stream.write_all(req.as_bytes()).unwrap();
-            let mut resp = String::new();
-            stream.read_to_string(&mut resp).unwrap();
-            assert!(resp.starts_with("HTTP/1.1 200 OK"), "Unexpected status response: {}", resp);
-            assert!(resp.contains("\"protocol\":\"0.1.0\"") || resp.contains("max_frame_bytes"));
-        }
-
-        // 2. Test authenticated POST /v1/transfers over real TCP socket
-        {
-            let token = AuthToken::create("test-watch", &device_secret);
-            let token_json = serde_json::to_string(&token).unwrap();
-
-            let manifest = Manifest::new(
-                "transfer-tcp-1".to_string(),
-                "audio.m4a".to_string(),
-                1024,
-                [0xAAu8; 32],
-                1700000000,
-            ).unwrap();
-            let body = serde_json::to_vec(&manifest).unwrap();
-
-            let mut stream = std::net::TcpStream::connect(addr).unwrap();
-            let req = format!(
-                "POST /v1/transfers HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                addr, token_json, body.len()
-            );
-            stream.write_all(req.as_bytes()).unwrap();
-            stream.write_all(&body).unwrap();
-
-            let mut resp = String::new();
-            stream.read_to_string(&mut resp).unwrap();
-            assert!(resp.starts_with("HTTP/1.1 201 Created"), "Unexpected create response: {}", resp);
-            assert!(resp.contains("transfer-tcp-1"));
-        }
-
-        // 3. Test PAKE pairing flow and GET /v1/peers over real TCP socket
-        {
-            service.set_pairing_pin("654321", 300);
-            let init_body = serde_json::to_vec(&serde_json::json!({
-                "device_id": "watch-pin-test",
-            })).unwrap();
-
-            let mut stream = std::net::TcpStream::connect(addr).unwrap();
-            let req = format!(
-                "POST /v1/pair/initiate HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                addr, init_body.len()
-            );
-            stream.write_all(req.as_bytes()).unwrap();
-            stream.write_all(&init_body).unwrap();
-            let mut init_resp = String::new();
-            stream.read_to_string(&mut init_resp).unwrap();
-            assert!(init_resp.starts_with("HTTP/1.1 200 OK"), "Unexpected init response: {}", init_resp);
-
-            let body_part = init_resp.split("\r\n\r\n").nth(1).unwrap();
-            let init_val: serde_json::Value = serde_json::from_str(body_part).unwrap();
-            let session_id = init_val["session_id"].as_str().unwrap();
-            let server_nonce = openwearsync_security::hex_to_32(init_val["server_nonce_hex"].as_str().unwrap()).unwrap();
-            let salt = openwearsync_security::hex_to_32(init_val["salt_hex"].as_str().unwrap()).unwrap();
-            let server_masked_pk = openwearsync_security::hex_to_32(init_val["server_masked_pk_hex"].as_str().unwrap()).unwrap();
-            let server_fingerprint = init_val["server_fingerprint"].as_str().unwrap();
-
-            let client_nonce = [0x77u8; 32];
-            let client_ephemeral_private = [0x55u8; 32];
-            let client_res = openwearsync_security::client_pake_exchange(
-                "654321",
-                &salt,
-                &server_nonce,
-                &client_nonce,
-                &server_masked_pk,
-                server_fingerprint,
-                &client_ephemeral_private,
-            );
-
-            let confirm_body = serde_json::to_vec(&serde_json::json!({
-                "session_id": session_id,
-                "device_id": "watch-pin-test",
-                "device_name": "Galaxy Watch Ultra",
-                "client_nonce_hex": openwearsync_security::bytes_to_hex(&client_nonce),
-                "client_masked_pk_hex": openwearsync_security::bytes_to_hex(&client_res.client_masked_pk),
-                "client_proof_hex": openwearsync_security::bytes_to_hex(&client_res.client_proof),
-            })).unwrap();
-
-            let mut stream_confirm = std::net::TcpStream::connect(addr).unwrap();
-            let req_confirm = format!(
-                "POST /v1/pair/confirm HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                addr, confirm_body.len()
-            );
-            stream_confirm.write_all(req_confirm.as_bytes()).unwrap();
-            stream_confirm.write_all(&confirm_body).unwrap();
-            let mut conf_resp = String::new();
-            stream_confirm.read_to_string(&mut conf_resp).unwrap();
-            assert!(conf_resp.starts_with("HTTP/1.1 200 OK"), "Unexpected confirm response: {}", conf_resp);
-            assert!(conf_resp.contains("\"status\":\"paired\""));
-
-            // Check GET /v1/peers
-            let mut stream2 = std::net::TcpStream::connect(addr).unwrap();
-            let req2 = format!("GET /v1/peers HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", addr);
-            stream2.write_all(req2.as_bytes()).unwrap();
-            let mut resp2 = String::new();
-            stream2.read_to_string(&mut resp2).unwrap();
-            assert!(resp2.starts_with("HTTP/1.1 200 OK"));
-            assert!(resp2.contains("watch-pin-test"));
-        }
-
-        handle.stop();
+        let store = Arc::new(DurableFileStore::new(temp.path().join("staging"), temp.path().join("dest"),
+            DurableTransferLedger::open(temp.path().join("ledger.db")).unwrap()).unwrap());
+        let service = Arc::new(ReceiverService::new(store, Arc::new(PairedPeerRegistry::new()), 4));
+        service.set_pairing_pin("654321", 300);
+        for n in 0..5 { assert!(service.enroll_with_pin(&format!("attacker-{n}"), "Attack", "000000").is_err()); }
+        assert!(service.enroll_with_pin("legitimate", "Watch", "654321").is_err());
+        service.set_pairing_pin("654321", 300);
+        let threads: Vec<_> = (0..8).map(|n| {
+            let service = service.clone();
+            std::thread::spawn(move || service.enroll_with_pin(&format!("watch-{n}"), "Watch", "654321"))
+        }).collect();
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(service.registry().list_peers().len(), 1);
+        service.set_pairing_pin("654321", 0);
+        assert!(service.enroll_with_pin("expired", "Watch", "654321").is_err());
     }
+
 }
 

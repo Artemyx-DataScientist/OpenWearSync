@@ -17,11 +17,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: aarch64-linux-android
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358"
+      - run: cargo install cargo-ndk --version 4.1.2 --locked
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/project-structure.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/client-receiver-integration.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1

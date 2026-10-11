@@ -32,6 +32,7 @@ android {
 
 tasks.withType<Test>().configureEach {
     jvmArgs("-Djava.net.preferIPv4Stack=true")
+    System.getenv("OPENWEARSYNC_NATIVE_TEST_DIR")?.let { jvmArgs("-Djava.library.path=$it") }
 }
 
 tasks.matching { it.name.contains("AarMetadata") }.configureEach {

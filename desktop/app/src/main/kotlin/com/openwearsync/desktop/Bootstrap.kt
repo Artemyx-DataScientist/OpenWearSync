@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -99,11 +100,11 @@ object ReceiverDaemonManager {
     }
 }
 
-class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659") {
+class ReceiverHttpClient(private val baseUrl: String = "https://localhost:35659") {
     fun isServerRunning(): Boolean {
         return try {
             val url = URL("$baseUrl/v1/status")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val conn = secureConnection(url).apply {
                 connectTimeout = 1500
                 readTimeout = 1500
                 requestMethod = "GET"
@@ -114,27 +115,27 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
         }
     }
 
-    fun getServerFingerprint(): String? {
-        return try {
-            val url = URL("$baseUrl/v1/status")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 1500
-                readTimeout = 1500
-                requestMethod = "GET"
-            }
-            if (conn.responseCode == 200) {
-                val text = conn.inputStream.bufferedReader().use { it.readText() }
-                """"server_fingerprint"\s*:\s*"([^"]+)"""".toRegex().find(text)?.groupValues?.get(1)
-            } else null
-        } catch (_: Exception) {
-            null
+    private fun certificateFile(): File = System.getenv("APPDATA")?.let { File(it, "OpenWearSync/receiver-cert.der") }
+        ?: File("openwearsync-data/receiver-cert.der")
+    private fun secureConnection(url: URL): javax.net.ssl.HttpsURLConnection {
+        require(url.protocol == "https")
+        val cert = certificateFile().inputStream().use { java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(it) }
+        val roots = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType()).apply { load(null); setCertificateEntry("receiver", cert) }
+        val trust = javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()).apply { init(roots) }
+        val tls = javax.net.ssl.SSLContext.getInstance("TLS").apply { init(null, trust.trustManagers, null) }
+        return (url.openConnection() as javax.net.ssl.HttpsURLConnection).apply {
+            sslSocketFactory = tls.socketFactory
+            instanceFollowRedirects = false
         }
     }
+    fun getServerFingerprint(): String? = try {
+        java.security.MessageDigest.getInstance("SHA-256").digest(certificateFile().readBytes()).joinToString("") { "%02x".format(it) }
+    } catch (_: Exception) { null }
 
     fun createPairingSession(pin: String? = null, ttlSecs: Long = 300L): String? {
         return try {
             val url = URL("$baseUrl/v1/pair/session")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val conn = secureConnection(url).apply {
                 requestMethod = "POST"
                 doOutput = true
                 connectTimeout = 2000
@@ -158,7 +159,7 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
     fun listPeers(): List<DesktopPeerRecord> {
         return try {
             val url = URL("$baseUrl/v1/peers")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val conn = secureConnection(url).apply {
                 connectTimeout = 2000
                 readTimeout = 2000
             }
@@ -173,7 +174,7 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
     fun revokePeer(deviceId: String): Boolean {
         return try {
             val url = URL("$baseUrl/v1/peers/$deviceId")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val conn = secureConnection(url).apply {
                 requestMethod = "DELETE"
                 connectTimeout = 2000
             }
@@ -186,7 +187,7 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
     fun listTransfers(): List<DesktopTransferRecord> {
         return try {
             val url = URL("$baseUrl/v1/transfers")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val conn = secureConnection(url).apply {
                 connectTimeout = 2000
                 readTimeout = 2000
             }
@@ -287,7 +288,7 @@ fun DesktopMainScreen() {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
                     Text("OpenWearSync Windows Receiver", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -305,11 +306,13 @@ fun DesktopMainScreen() {
                     }
                     if (serverFingerprint != null) {
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Server Fingerprint: ${serverFingerprint?.take(16)}...",
-                            fontSize = 11.sp,
-                            color = Color(0xFF64748B),
-                        )
+                        SelectionContainer {
+                            Text(
+                                text = "Certificate SHA-256 (enter on watch before PIN):\n$serverFingerprint",
+                                fontSize = 11.sp,
+                                color = Color(0xFF94A3B8),
+                            )
+                        }
                     }
                 }
 

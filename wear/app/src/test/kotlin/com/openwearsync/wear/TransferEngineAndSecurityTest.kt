@@ -4,7 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 // START_MODULE_CONTRACT
-// PURPOSE: Unit tests for NativeTransferBridge, PAKE key derivation, encrypted chunks, and transfer security.
+// PURPOSE: Unit tests for NativeTransferBridge, independent pin enforcement, encrypted chunks, and transfer security.
 // SCOPE: Offline deterministic verification of cryptographic contracts without requiring hardware watch.
 // DEPENDS: M-TRANSFER-CORE, M-PAIRING-SECURITY, M-ANDROID-PLATFORM
 // LINKS: M-TRANSFER-CORE, M-PAIRING-SECURITY, V-M-PAIRING-SECURITY
@@ -17,48 +17,10 @@ import org.junit.Test
 class TransferEngineAndSecurityTest {
 
     @Test
-    fun testPakeKeyDerivationDeterministicProofs() {
-        val pin = "123456"
-        val saltHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-        val serverNonceHex = "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
-        val clientNonceHex = "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60"
-        val deviceId = "watch-test-device"
-        val serverFingerprint = "abcd1234deadbeef"
-
-        val keys1 = NativeTransferBridge.derivePakeKeys(
-            pin = pin,
-            saltHex = saltHex,
-            serverNonceHex = serverNonceHex,
-            clientNonceHex = clientNonceHex,
-            deviceId = deviceId,
-            serverFingerprint = serverFingerprint,
-        )
-
-        val keys2 = NativeTransferBridge.derivePakeKeys(
-            pin = pin,
-            saltHex = saltHex,
-            serverNonceHex = serverNonceHex,
-            clientNonceHex = clientNonceHex,
-            deviceId = deviceId,
-            serverFingerprint = serverFingerprint,
-        )
-
-        assertEquals(keys1.clientProofHex, keys2.clientProofHex)
-        assertEquals(keys1.serverProofHex, keys2.serverProofHex)
-        assertEquals(keys1.sharedSecretHex, keys2.sharedSecretHex)
-
-        // Wrong PIN produces different proofs
-        val keysWrongPin = NativeTransferBridge.derivePakeKeys(
-            pin = "654321",
-            saltHex = saltHex,
-            serverNonceHex = serverNonceHex,
-            clientNonceHex = clientNonceHex,
-            deviceId = deviceId,
-            serverFingerprint = serverFingerprint,
-        )
-
-        assertNotEquals(keys1.clientProofHex, keysWrongPin.clientProofHex)
-        assertNotEquals(keys1.sharedSecretHex, keysWrongPin.sharedSecretHex)
+    fun pairingRequiresAnIndependentPinBeforeAnyNetworkRequest() {
+        val result = TransferEngine().pair(ReceiverEndpoint("127.0.0.1", 1), "watch", "Watch", "123456")
+        assertFalse(result.success)
+        assertTrue(result.error!!.contains("fingerprint"))
     }
 
     @Test
@@ -70,8 +32,8 @@ class TransferEngineAndSecurityTest {
 
         val encrypted = NativeTransferBridge.encryptChunk(key, nonce, chunkIndex, payload)
 
-        // Encrypted chunk wire format: ciphertext + 32-byte auth tag (nonce is provided in auth token)
-        assertEquals(payload.size + 32, encrypted.size)
+        // Encrypted chunk wire format: ciphertext + 16-byte AES-GCM tag (nonce is provided in auth token)
+        assertEquals(payload.size + 16, encrypted.size)
 
         // Plaintext must not be exposed in ciphertext
         assertFalse(String(encrypted, Charsets.ISO_8859_1).contains("OpenWearSync voice recording"))

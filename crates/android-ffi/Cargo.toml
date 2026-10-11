@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+jni = "=0.21.1"
 openwearsync-protocol = { path = "../protocol" }
 openwearsync-security = { path = "../security" }
 openwearsync-transfer-core = { path = "../transfer-core" }

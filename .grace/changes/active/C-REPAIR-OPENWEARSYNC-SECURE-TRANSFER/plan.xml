@@ -1,0 +1,91 @@
+<GraceChangePlan graceVersion="4.0" status="approved">
+  <C-REPAIR-OPENWEARSYNC-SECURE-TRANSFER>
+    <IntentSummary>Execute the repair sequentially from implemented commit 71b84ab. Preserve the original approved change; use regression-first implementation and native host integration, with separate unexecuted device gates.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>crates/protocol/Cargo.toml</Value>
+        <Value>wear/app/build.gradle.kts</Value>
+        <Value>desktop/app/build.gradle.kts</Value>
+        <Value>scripts/gates/rust-core.ps1</Value>
+        <Value>.grace/changes/active/C-IMPLEMENT-OPENWEARSYNC-END-TO-END/spec.xml</Value>
+        <Value>.grace/changes/active/C-IMPLEMENT-OPENWEARSYNC-END-TO-END/plan.xml</Value>
+      </MustExist>
+      <MustContain>
+        <File>.grace/changes/active/C-IMPLEMENT-OPENWEARSYNC-END-TO-END/spec.xml</File>
+        <Text>status="approved"</Text>
+      </MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>crates/security/src/tls.rs</Value>
+        <Value>scripts/gates/client-receiver-integration.ps1</Value>
+        <Value>wear/app/src/test/kotlin/com/openwearsync/wear/ClientReceiverIntegrationTest.kt</Value>
+        <Value>wear/app/src/test/kotlin/com/openwearsync/wear/PeerCredentialsStoreTest.kt</Value>
+      </MustExist>
+      <MustNotContain>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/PeerCredentialsStore.kt</File>
+        <Text>FALLBACK_KEY_BYTES</Text>
+      </MustNotContain>
+      <MustNotContain>
+        <File>wear/app/src/main/kotlin/com/openwearsync/wear/NativeTransferBridge.kt</File>
+        <Text>X25519</Text>
+      </MustNotContain>
+      <MustPassCommand>
+        <Command>cargo test --workspace --locked</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/client-receiver-integration.ps1</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command>
+        <Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphDocuments><GD-MAIN /></GraphDocuments>
+      <VerificationDocuments><VD-MAIN /></VerificationDocuments>
+      <GraphAnchors><M-WEAR-SHELL /><M-ANDROID-PLATFORM /><M-TRANSFER-CORE /><M-PAIRING-SECURITY /><M-WINDOWS-RECEIVER /><M-DESKTOP-UI /><DF-DISCOVERY-AND-PAIRING /><DF-ENCRYPTED-CHUNK-UPLOAD /><DF-LIFECYCLE-CLEANUP /></GraphAnchors>
+      <VerificationAnchors><V-M-WEAR-SHELL /><V-M-ANDROID-PLATFORM /><V-M-TRANSFER-CORE /><V-M-PAIRING-SECURITY /><V-M-WINDOWS-RECEIVER /><V-M-DESKTOP-UI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>README.md</File>
+      <Glob>crates/security/**</Glob>
+      <Glob>crates/android-ffi/**</Glob>
+      <Glob>crates/receiver/**</Glob>
+      <Glob>wear/app/**</Glob>
+      <Glob>desktop/app/**</Glob>
+      <Glob>scripts/gates/**</Glob>
+      <Glob>.github/workflows/**</Glob>
+      <Glob>docs/implementation/**</Glob>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Pin transfer and storage failures with executable regression tests</Title>
+        <DependsOn />
+        <AcceptanceCriteria><Criterion>Exercise real TransferEngine against the receiver with the built native library, multiple encrypted chunks and an interrupted/restarted transfer. Add key-provider and preference-failure tests at the real store boundary. Observe failure on original behavior before each repair.</Criterion></AcceptanceCriteria>
+        <Verification><Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/client-receiver-integration.ps1</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Repair request authentication and native plaintext chunk semantics</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria><Criterion>Mint a TokenData per request, bind block encryption to that token's nonce, pass plaintext sha256Hex and plaintext length through the JNI signature, abort failed reconciliation and release the native session exactly once. Never retry the same token through a fallback backend.</Criterion></AcceptanceCriteria>
+        <Verification><Command>cargo test --workspace --locked</Command><Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/client-receiver-integration.ps1</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Close protected storage and UI failure paths</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria><Criterion>Remove constant-key fallback, require successful secret and fingerprint decryption, commit preferences before returning success, and expose pairing in UI/in-memory state only after secure persistence succeeds. Preserve existing stored values on failure.</Criterion></AcceptanceCriteria>
+        <Verification><Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-unit.ps1</Command></Verification>
+      </T-003>
+      <T-004>
+        <Title>Implement pinned HTTPS and remove custom PIN cryptography</Title>
+        <DependsOn>T-002, T-003</DependsOn>
+        <AcceptanceCriteria><Criterion>Use rustls with a ring provider and rcgen for persistent local TLS identity; protect its private key with current-user DPAPI on Windows and owner-only Unix files; derive the full SHA-256 fingerprint from DER. Exact pin trust is followed by normal WebPki and TLS signature checks. Expose the pin on trusted PC UI and require it before watch enrollment. Use an expiring one-use PIN over pinned TLS, random per-device secret and session/global guessing limit. Replace the custom block cipher with RustCrypto AES-256-GCM; remove legacy PAKE routes and all HTTP fallback.</Criterion></AcceptanceCriteria>
+        <Verification><Command>cargo test --workspace --locked</Command><Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/client-receiver-integration.ps1</Command></Verification>
+      </T-004>
+      <T-005>
+        <Title>Verify builds, scope and independent bypass/regression review</Title>
+        <DependsOn>T-004</DependsOn>
+        <AcceptanceCriteria><Criterion>Build the current Android aarch64 native library and package it into an unskipped debug APK; build Desktop jar and run all Rust/JVM/client-receiver gates. Perform one fresh read-only review of the complete candidate diff, verify confirmed findings, and document local evidence separately from pending hardware acceptance. Original approved XML remains byte-identical and its change remains active.</Criterion></AcceptanceCriteria>
+        <Verification><Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</Command><Command>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</Command><Command>grace lint --path . --change C-REPAIR-OPENWEARSYNC-SECURE-TRANSFER --assertions final</Command></Verification>
+      </T-005>
+    </ImplementationPlan>
+  </C-REPAIR-OPENWEARSYNC-SECURE-TRANSFER>
+</GraceChangePlan>

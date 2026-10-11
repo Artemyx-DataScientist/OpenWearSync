@@ -1,8 +1,6 @@
 package com.openwearsync.wear
 
 import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
@@ -10,8 +8,8 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 // START_MODULE_CONTRACT
-// PURPOSE: Authenticated, resumable HTTP/socket transfer engine transferring audio recordings from Wear OS to Windows receiver.
-// SCOPE: Deterministic transfer IDs, HMAC-SHA256 authentication tokens, zero-knowledge PAKE pairing, encrypted chunk streaming, SHA-256 verification, reconciliation, pause/cancel control, and Rust JNI integration.
+// PURPOSE: Authenticated, resumable pinned HTTPS transfer engine transferring audio recordings from Wear OS to Windows receiver.
+// SCOPE: Deterministic transfer IDs, HMAC-SHA256 authentication tokens, independently pinned TLS enrollment, encrypted chunk streaming, SHA-256 verification, reconciliation, pause/cancel control, and Rust JNI integration.
 // DEPENDS: M-WEAR-SHELL, M-ANDROID-PLATFORM, M-TRANSFER-CORE, M-PAIRING-SECURITY
 // LINKS: M-WEAR-SHELL, M-TRANSFER-CORE, M-PAIRING-SECURITY, DF-ENCRYPTED-CHUNK-UPLOAD, DF-LIFECYCLE-CLEANUP
 // END_MODULE_CONTRACT
@@ -20,7 +18,7 @@ import javax.crypto.spec.SecretKeySpec
 //   TransferStatus - lifecycle status enum of active transfer.
 //   TransferProgress - observable state model of an in-flight transfer.
 //   PairingResult - outcome of receiver enrollment attempt with pinned server fingerprint.
-//   TransferEngine - HTTP/socket streaming client executing authenticated chunk uploads, reconciliation, and progress reporting via NativeTransferBridge.
+//   TransferEngine - pinned HTTPS streaming client executing authenticated chunk uploads, reconciliation, and progress reporting via NativeTransferBridge.
 // END_MODULE_MAP
 
 enum class TransferStatus {
@@ -72,6 +70,7 @@ class TransferEngine {
 
     companion object {
         fun fromHex(s: String): ByteArray {
+            require(s.length % 2 == 0 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' })
             val len = s.length
             val data = ByteArray(len / 2)
             for (i in 0 until len step 2) {
@@ -94,6 +93,8 @@ class TransferEngine {
         )
 
         fun createAuthTokenData(deviceId: String, sharedSecretHex: String): TokenData {
+            require(deviceId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+            require(sharedSecretHex.matches(Regex("[0-9a-fA-F]{64}")))
             val secret = fromHex(sharedSecretHex)
             val now = System.currentTimeMillis() / 1000L
             val nonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
@@ -135,111 +136,25 @@ class TransferEngine {
     }
 
     // START_CONTRACT: TransferEngine::pair
-    // PURPOSE: Perform Zero-Knowledge PAKE enrollment with Windows receiver, pinning server public key fingerprint.
-    // INPUTS: { endpoint: ReceiverEndpoint, deviceId: String, deviceName: String, pin: String, pinnedFingerprint: String? }
-    // OUTPUTS: { PairingResult }
-    // SIDE_EFFECTS: Executes PAKE mutual challenge-response with rate-limiting and identity pinning.
+    // PURPOSE: Enroll with a one-use PIN only after independently pinned TLS authentication.
+    // INPUTS: Receiver endpoint, device ID/name, PIN and full certificate fingerprint obtained from trusted PC.
+    // OUTPUTS: PairingResult containing a random enrollment secret, or failure.
+    // SIDE_EFFECTS: Pinned HTTPS enrollment; consumes one receiver session on success.
     // END_CONTRACT: TransferEngine::pair
-    fun pair(
-        endpoint: ReceiverEndpoint,
-        deviceId: String,
-        deviceName: String,
-        pin: String,
-        pinnedFingerprint: String? = null,
-    ): PairingResult {
-        return try {
-            // Step 1: Initiate PAKE handshake
-            val initUrl = URL("http://${endpoint.host}:${endpoint.port}/v1/pair/initiate")
-            val initConn = (initUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                connectTimeout = 10_000
-                readTimeout = 10_000
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Connection", "close")
-            }
-            val initBody = """{"device_id":"$deviceId","device_name":"$deviceName"}"""
-            initConn.outputStream.use { it.write(initBody.toByteArray(Charsets.UTF_8)) }
-
-            val initCode = initConn.responseCode
-            if (initCode == 200) {
-                val resp = initConn.inputStream.bufferedReader().use { it.readText() }
-                val sessionId = extractJsonField(resp, "session_id") ?: return PairingResult(false, error = "Missing session_id")
-                val serverNonceHex = extractJsonField(resp, "server_nonce_hex") ?: return PairingResult(false, error = "Missing server_nonce_hex")
-                val saltHex = extractJsonField(resp, "salt_hex") ?: return PairingResult(false, error = "Missing salt_hex")
-                val serverMaskedPkHex = extractJsonField(resp, "server_masked_pk_hex")
-                val serverFp = extractJsonField(resp, "server_fingerprint") ?: ""
-
-                // Verify pinned fingerprint if previously established
-                if (!pinnedFingerprint.isNullOrEmpty() && serverFp.isNotEmpty() && pinnedFingerprint != serverFp) {
-                    return PairingResult(false, error = "Server identity mismatch: pinned=$pinnedFingerprint, received=$serverFp")
-                }
-
-                // Generate 32-byte client nonce
-                val clientNonce = ByteArray(32).apply { SecureRandom().nextBytes(this) }
-                val clientNonceHex = toHex(clientNonce)
-
-                // Step 2: Derive PAKE proofs and session shared secret using Native Rust Core
-                val pakeResult = NativeTransferBridge.derivePakeKeys(
-                    pin = pin.trim(),
-                    saltHex = saltHex,
-                    serverNonceHex = serverNonceHex,
-                    clientNonceHex = clientNonceHex,
-                    deviceId = deviceId,
-                    serverFingerprint = serverFp,
-                    serverMaskedPkHex = serverMaskedPkHex,
-                )
-
-                // Step 3: Confirm with client proof and masked ephemeral public key
-                val confirmUrl = URL("http://${endpoint.host}:${endpoint.port}/v1/pair/confirm")
-                val confirmConn = (confirmUrl.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 10_000
-                    readTimeout = 10_000
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("Connection", "close")
-                }
-                val confirmBody = """{
-                    "session_id":"$sessionId",
-                    "device_id":"$deviceId",
-                    "device_name":"$deviceName",
-                    "client_nonce_hex":"$clientNonceHex",
-                    "client_masked_pk_hex":"${pakeResult.clientMaskedPkHex}",
-                    "client_proof_hex":"${pakeResult.clientProofHex}"
-                }""".trimIndent()
-                confirmConn.outputStream.use { it.write(confirmBody.toByteArray(Charsets.UTF_8)) }
-
-                val confirmCode = confirmConn.responseCode
-                if (confirmCode == 200) {
-                    val confResp = confirmConn.inputStream.bufferedReader().use { it.readText() }
-                    val receivedServerProof = extractJsonField(confResp, "server_proof_hex") ?: ""
-                    // Mutual verification: server must demonstrate knowledge of PAKE proof
-                    if (receivedServerProof != pakeResult.serverProofHex) {
-                        return PairingResult(false, error = "Server proof verification failed (invalid server)")
-                    }
-                    val confirmedFp = extractJsonField(confResp, "server_fingerprint") ?: serverFp
-                    PairingResult(
-                        success = true,
-                        sharedSecretHex = pakeResult.sharedSecretHex,
-                        serverFingerprint = confirmedFp,
-                    )
-                } else {
-                    val err = confirmConn.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP $confirmCode"
-                    PairingResult(false, error = err)
-                }
-            } else {
-                val err = initConn.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP $initCode"
-                PairingResult(false, error = "Initiate pairing failed: $err")
-            }
-        } catch (e: Exception) {
-            PairingResult(success = false, error = e.message ?: "Connection failed")
-        }
-    }
-
-    private fun getAuthHeader(deviceId: String?, sharedSecretHex: String?): String? {
-        if (deviceId == null || sharedSecretHex == null) return null
-        return "Bearer ${createAuthToken(deviceId, sharedSecretHex)}"
+    fun pair(endpoint: ReceiverEndpoint, deviceId: String, deviceName: String, pin: String,
+        pinnedFingerprint: String? = null): PairingResult {
+        if (pinnedFingerprint == null || !pinnedFingerprint.matches(Regex("[0-9a-fA-F]{64}")))
+            return PairingResult(false, error = "Enter the full certificate fingerprint from the trusted PC first")
+        if (!pin.matches(Regex("[0-9]{6}"))) return PairingResult(false, error = "PIN must have six digits")
+        val trustedPin = pinnedFingerprint.lowercase()
+        val body = "{\"device_id\":${jsonString(deviceId)},\"device_name\":${jsonString(deviceName)},\"pin\":${jsonString(pin)}}"
+        val (code, response) = NativeTransferBridge.httpsRequest(endpoint.host, endpoint.port, trustedPin,
+            "POST", "/v1/pair/enroll", body = body.toByteArray(Charsets.UTF_8))
+        if (code != 200 || response == null) return PairingResult(false, error = "Secure enrollment failed: $code")
+        val secret = extractJsonField(response, "shared_secret_hex")
+        if (secret == null || !secret.matches(Regex("[0-9a-f]{64}")) || extractJsonField(response, "server_fingerprint") != trustedPin)
+            return PairingResult(false, error = "Invalid secure enrollment response")
+        return PairingResult(true, secret, trustedPin)
     }
 
     // START_CONTRACT: TransferEngine::transferRecording
@@ -262,33 +177,23 @@ class TransferEngine {
         val totalBytes = descriptor.sizeBytes
         val fileName = descriptor.displayName
         val transferId = computeTransferId(descriptor)
-        val tokenData = if (deviceId != null && sharedSecretHex != null) createAuthTokenData(deviceId, sharedSecretHex) else null
-        val token = tokenData?.authHeader ?: ""
-        val tokenNonce = tokenData?.nonce ?: ByteArray(16)
+        fun requestToken() = if (deviceId != null && sharedSecretHex != null) createAuthTokenData(deviceId, sharedSecretHex) else null
 
+        if (deviceId == null || sharedSecretHex == null || !sharedSecretHex.matches(Regex("[0-9a-fA-F]{64}")) ||
+            pinnedFingerprint == null || !pinnedFingerprint.matches(Regex("[0-9a-fA-F]{64}")) || !NativeTransferBridge.isNativeLoaded) {
+            onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Protected credentials, native TLS and independent certificate pin required; re-pair if necessary"))
+            return false
+        }
+        val trustedPin = pinnedFingerprint.lowercase()
         val nativeSession = NativeTransferBridge.createSession(totalBytes)
+        if (nativeSession == 0L) return false
+        try {
         onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.CONNECTING))
 
-        // 1. Verify receiver identity and pinned fingerprint
-        try {
-            val statusUrl = URL("http://${endpoint.host}:${endpoint.port}/v1/status")
-            val statusConn = (statusUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5_000
-                readTimeout = 5_000
-                setRequestProperty("Connection", "close")
-            }
-            if (statusConn.responseCode == 200) {
-                val statusBody = statusConn.inputStream.bufferedReader().use { it.readText() }
-                val serverFp = extractJsonField(statusBody, "server_fingerprint")
-                if (!pinnedFingerprint.isNullOrEmpty() && !serverFp.isNullOrEmpty() && serverFp != pinnedFingerprint) {
-                    onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Server identity changed! Pinned fingerprint mismatch."))
-                    NativeTransferBridge.destroySession(nativeSession)
-                    return false
-                }
-            }
-        } catch (e: Exception) {
-            onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Cannot connect to receiver: ${e.message}"))
-            NativeTransferBridge.destroySession(nativeSession)
+        // Authenticate the exact independently obtained certificate before reading or sending audio.
+        val (statusCode, statusBody) = NativeTransferBridge.httpsRequest(endpoint.host, endpoint.port, trustedPin, "GET", "/v1/status")
+        if (statusCode != 200 || statusBody == null || extractJsonField(statusBody, "server_fingerprint") != trustedPin) {
+            onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Cannot authenticate receiver certificate"))
             return false
         }
 
@@ -304,7 +209,6 @@ class TransferEngine {
             }
         } catch (e: Exception) {
             onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Read error: ${e.message}"))
-            NativeTransferBridge.destroySession(nativeSession)
             return false
         }
         val fullShaHex = toHex(digest.digest())
@@ -313,7 +217,7 @@ class TransferEngine {
         val manifestJson = """{
             "manifest": {
                 "transfer_id": "$transferId",
-                "file_name": "$fileName",
+                "file_name": ${jsonString(fileName)},
                 "size_bytes": $totalBytes,
                 "sha256": "$fullShaHex",
                 "modified_at_ms": ${descriptor.modifiedEpochSeconds?.times(1000) ?: System.currentTimeMillis()}
@@ -324,12 +228,12 @@ class TransferEngine {
             endpoint.host,
             endpoint.port,
             manifestJson,
-            token,
+            requestToken()?.authHeader ?: "",
+            pinnedFingerprint = trustedPin,
         )
 
-        if (createCode != 200 && createCode != 201 && createCode != 409) {
+        if (createCode != 200 && createCode != 201) {
             onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Create transfer failed: HTTP $createCode ($createResp)"))
-            NativeTransferBridge.destroySession(nativeSession)
             return false
         }
 
@@ -340,8 +244,14 @@ class TransferEngine {
             endpoint.host,
             endpoint.port,
             transferId,
-            token,
+            requestToken()?.authHeader ?: "",
+            pinnedFingerprint = trustedPin,
         )
+
+        if (recCode != 200 || recResp == null) {
+            onProgress(TransferProgress(fileName, 0L, totalBytes, 0, TransferStatus.FAILED, "Reconciliation failed: HTTP $recCode"))
+            return false
+        }
 
         if (recCode == 200 && recResp != null) {
             val chunkPattern = """"offset"\s*:\s*(\d+)\s*,\s*"length"\s*:\s*(\d+)""".toRegex()
@@ -364,13 +274,19 @@ class TransferEngine {
 
         try {
             descriptor.openStream().use { stream ->
-                var bytesRead: Int
-                while (stream.read(chunkBuf).also { bytesRead = it } != -1) {
+                while (true) {
+                    var bytesRead = 0
+                    while (bytesRead < chunkSize) {
+                        val r = stream.read(chunkBuf, bytesRead, chunkSize - bytesRead)
+                        if (r == -1) break
+                        bytesRead += r
+                    }
+                    if (bytesRead == 0) break
+
                     if (isCancelled.get()) {
                         NativeTransferBridge.cancelSession(nativeSession)
                         onProgress(TransferProgress(fileName, offset, totalBytes, (offset * 100 / totalBytes).toInt(), TransferStatus.CANCELLED))
-                        NativeTransferBridge.destroySession(nativeSession)
-                        return false
+                                    return false
                     }
 
                     while (isPaused.get()) {
@@ -380,8 +296,7 @@ class TransferEngine {
                         if (isCancelled.get()) {
                             NativeTransferBridge.cancelSession(nativeSession)
                             onProgress(TransferProgress(fileName, offset, totalBytes, (offset * 100 / totalBytes).toInt(), TransferStatus.CANCELLED))
-                            NativeTransferBridge.destroySession(nativeSession)
-                            return false
+                                            return false
                         }
                     }
                     NativeTransferBridge.resumeSession(nativeSession)
@@ -398,10 +313,11 @@ class TransferEngine {
                     val rawChunkData = chunkBuf.copyOf(bytesRead)
                     val chunkSha = toHex(NativeTransferBridge.computeSha256(rawChunkData))
                     val chunkIdx = (offset / (64 * 1024L)).toInt()
+                    val chunkToken = requestToken()
 
                     // Encrypt payload if shared secret is available
                     val (payloadToSend, isEncrypted) = if (deviceSecretBytes != null) {
-                        Pair(NativeTransferBridge.encryptChunk(deviceSecretBytes, tokenNonce, chunkIdx, rawChunkData), true)
+                        Pair(NativeTransferBridge.encryptChunk(deviceSecretBytes, requireNotNull(chunkToken).nonce, chunkIdx, rawChunkData), true)
                     } else {
                         Pair(rawChunkData, false)
                     }
@@ -414,15 +330,16 @@ class TransferEngine {
                         transferId = transferId,
                         offset = offset,
                         chunkData = payloadToSend,
-                        token = token,
+                        token = chunkToken?.authHeader ?: "",
                         isEncrypted = isEncrypted,
                         sha256Hex = chunkSha,
+                        plaintextLength = bytesRead,
+                        pinnedFingerprint = trustedPin,
                     )
 
                     if (upCode != 200) {
                         onProgress(TransferProgress(fileName, offset, totalBytes, (offset * 100 / totalBytes).toInt(), TransferStatus.FAILED, "Chunk upload failed: HTTP $upCode"))
-                        NativeTransferBridge.destroySession(nativeSession)
-                        return false
+                                    return false
                     }
 
                     NativeTransferBridge.recordChunk(nativeSession, offset, bytesRead)
@@ -434,7 +351,6 @@ class TransferEngine {
             }
         } catch (e: Exception) {
             onProgress(TransferProgress(fileName, offset, totalBytes, (offset * 100 / totalBytes).toInt(), TransferStatus.FAILED, "Transfer error: ${e.message}"))
-            NativeTransferBridge.destroySession(nativeSession)
             return false
         }
 
@@ -443,22 +359,34 @@ class TransferEngine {
             endpoint.host,
             endpoint.port,
             transferId,
-            token,
+            requestToken()?.authHeader ?: "",
+            pinnedFingerprint = trustedPin,
         )
 
         if (commitCode == 200) {
             onProgress(TransferProgress(fileName, totalBytes, totalBytes, 100, TransferStatus.COMPLETED))
-            NativeTransferBridge.destroySession(nativeSession)
             return true
         } else {
             onProgress(TransferProgress(fileName, totalBytes, totalBytes, 100, TransferStatus.FAILED, "Commit failed: HTTP $commitCode ($commitResp)"))
-            NativeTransferBridge.destroySession(nativeSession)
             return false
         }
+        } finally {
+            NativeTransferBridge.destroySession(nativeSession)
+        }
     }
+
 
     private fun extractJsonField(json: String, field: String): String? {
         val pattern = """"$field"\s*:\s*"([^"]+)"""".toRegex()
         return pattern.find(json)?.groupValues?.get(1)
+    }
+    private fun jsonString(value: String): String = buildString {
+        append('"')
+        for (c in value) when (c) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            else -> if (c.code < 32) append("\\u%04x".format(c.code)) else append(c)
+        }
+        append('"')
     }
 }

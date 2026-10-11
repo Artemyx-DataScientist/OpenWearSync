@@ -1,0 +1,54 @@
+<GraceChangeSpec graceVersion="4.0" status="approved">
+  <C-REPAIR-OPENWEARSYNC-SECURE-TRANSFER>
+    <Summary>Repair the confirmed 71b84ab transfer and secret-storage defects and replace insecure network pairing with independently pinned HTTPS.</Summary>
+    <Problem>Kotlin reuses a request nonce, JNI replaces plaintext chunk digests and records ciphertext lengths, Keystore failure uses a public constant key, and the network uses HTTP and an unreviewed PIN exchange. The original approved bootstrap baseline no longer matches the implemented repository.</Problem>
+    <Goals>
+      <Goal>Complete and resume actual Kotlin TransferEngine transfers through the Rust JNI library and ReceiverService with verified final bytes.</Goal>
+      <Goal>Generate fresh authentication for every request and retry; keep each encrypted block bound to its request nonce, plaintext hash and plaintext length.</Goal>
+      <Goal>Fail closed when protected credential storage or pinned receiver identity is unavailable, including UI and in-memory credentials.</Goal>
+      <Goal>Use TLS for all network endpoints with an independently supplied full SHA-256 certificate fingerprint; remove the custom X25519-EKE exchange and every HTTP downgrade.</Goal>
+    </Goals>
+    <Constraints>
+      <Constraint>Preserve the original approved C-IMPLEMENT-OPENWEARSYNC-END-TO-END spec and plan unchanged and active. This is a sequential scoped repair, not concurrent execution of the original bootstrap plan.</Constraint>
+      <Constraint>Before initial enrollment the user must obtain the full 64-hex certificate fingerprint from the trusted PC and enter it on the watch. Never learn a trusted pin from unauthenticated status, discovery or TOFU.</Constraint>
+      <Constraint>A one-time PIN sent only inside independently authenticated TLS provides the T-004 alternative of offline-guessing resistance. Do not describe this as PAKE or as an independently audited application protocol.</Constraint>
+      <Constraint>Validate the exact certificate pin, certificate validity, service identity, permitted usage and TLS handshake signatures. No accept-all verifier, insecure fallback, redirect or empty pin.</Constraint>
+      <Constraint>Enrollment uses random 256-bit device secrets, an atomic one-use session, bounded session-wide guessing independent of device_id, expiry and revocation. Do not expose administrative enrollment or history over the LAN.</Constraint>
+      <Constraint>Replace the bespoke chunk cipher with library AES-256-GCM using request-nonce-derived per-request keys and authenticated chunk index. No secret-dependent home-grown cipher or PIN-derived long-term key.</Constraint>
+      <Constraint>Existing insecure identities require explicit re-pairing. Never silently reinterpret the old X25519 fingerprint as a TLS certificate pin.</Constraint>
+      <Constraint>Protect the Windows TLS private key with current-user DPAPI and fail closed on identity corruption; on Unix use private owner-only files. The public certificate may be read by the local desktop client.</Constraint>
+      <Constraint>Keep recordings, manifests, final file integrity, resource bounds and durable resume behavior. Limit changes to the affected transfer/security paths, their callers, tests and build gates.</Constraint>
+      <Constraint>Host JNI verification is not Android ART or physical watch acceptance. Keep hardware and release acceptance pending.</Constraint>
+    </Constraints>
+    <NonGoals>
+      <NonGoal>Changing Samsung recording discovery, hotspot topology or adding a mandatory phone/cloud relay.</NonGoal>
+      <NonGoal>Claiming all original product requirements or device gates are accepted.</NonGoal>
+      <NonGoal>Publishing, pushing, deploying or deleting user data.</NonGoal>
+    </NonGoals>
+    <AcceptanceCriteria>
+      <Criterion>The real Kotlin client with the built native library pairs over pinned TLS, transfers multiple encrypted chunks, commits and produces byte-identical audio on disk.</Criterion>
+      <Criterion>The same client survives a forced interrupted attempt and receiver restart, reconciles durable plaintext ranges, resumes and produces one correct final file.</Criterion>
+      <Criterion>Replayed authentication is rejected; fresh authentication succeeds; reconciliation failure prevents upload; JNI forwards the supplied plaintext SHA-256 and plaintext byte count.</Criterion>
+      <Criterion>Key acquisition, encryption, decryption and durable preferences failure produce no usable new pairing, no constant-key ciphertext and no false paired UI state.</Criterion>
+      <Criterion>Missing/wrong pins, plaintext HTTP, legacy pairing, expired/consumed enrollment sessions, wrong PIN guesses with varying device IDs, tampered blocks and revoked devices are rejected.</Criterion>
+      <Criterion>Rust workspace tests, real Kotlin/JNI receiver integration, JVM tests, full Android ABI/debug APK build and Desktop jar build pass or their exact limitations are reported.</Criterion>
+      <Criterion>GRACE repair baseline/target assertions and semantic markup are validated; original stale bootstrap assertions and physical-device gaps remain explicitly distinguished.</Criterion>
+    </AcceptanceCriteria>
+    <AffectedAreas>
+      <M-WEAR-SHELL />
+      <M-ANDROID-PLATFORM />
+      <M-TRANSFER-CORE />
+      <M-PAIRING-SECURITY />
+      <M-WINDOWS-RECEIVER />
+      <M-DESKTOP-UI />
+    </AffectedAreas>
+    <VerificationIntent>
+      <ExpectedCommand>cargo test --workspace --locked</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/client-receiver-integration.ps1</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1</ExpectedCommand>
+      <ExpectedCommand>powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1</ExpectedCommand>
+      <ExpectedEvidence>Regression tests fail before the corresponding fixes and pass afterward.</ExpectedEvidence>
+      <ExpectedEvidence>No production credentials or signing keys are committed; device acceptance remains pending.</ExpectedEvidence>
+    </VerificationIntent>
+  </C-REPAIR-OPENWEARSYNC-SECURE-TRANSFER>
+</GraceChangeSpec>
