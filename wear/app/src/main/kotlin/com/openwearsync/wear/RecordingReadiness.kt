@@ -81,7 +81,77 @@ data class ReadinessScanResult(
     val block: ReadinessBlock? = null,
 )
 
-class RecordingReadinessAdapter(private val provider: RecordingProvider) {
+object AudioContainerInspector {
+    // START_CONTRACT: AudioContainerInspector::isM4aContainerFinalized
+    // PURPOSE: Inspect ISO base media (M4A/MP4) byte stream to verify container closure and presence of moov atom.
+    // INPUTS: { stream: InputStream }
+    // OUTPUTS: { Boolean - true if header is valid and container is finalized }
+    // SIDE_EFFECTS: Reads bounded header bytes from the input stream.
+    // END_CONTRACT: AudioContainerInspector::isM4aContainerFinalized
+    fun isM4aContainerFinalized(stream: InputStream): Boolean {
+        return try {
+            val header = ByteArray(8)
+            val bytesRead = stream.read(header)
+            if (bytesRead < 8) return false
+
+            val boxLen = ((header[0].toInt() and 0xFF) shl 24) or
+                    ((header[1].toInt() and 0xFF) shl 16) or
+                    ((header[2].toInt() and 0xFF) shl 8) or
+                    (header[3].toInt() and 0xFF)
+            val boxType = String(header, 4, 4, Charsets.US_ASCII)
+
+            if (boxType == "ftyp") {
+                val remainingInBox = (boxLen - 8).toLong()
+                if (remainingInBox > 0) {
+                    stream.skip(remainingInBox)
+                }
+
+                var scanned = 0L
+                val maxScan = 2 * 1024 * 1024L
+                while (scanned < maxScan) {
+                    val nextHeader = ByteArray(8)
+                    val r = stream.read(nextHeader)
+                    if (r < 8) break
+                    scanned += 8
+
+                    val nextLen = ((nextHeader[0].toInt() and 0xFF).toLong() shl 24) or
+                            ((nextHeader[1].toInt() and 0xFF).toLong() shl 16) or
+                            ((nextHeader[2].toInt() and 0xFF).toLong() shl 8) or
+                            (nextHeader[3].toInt() and 0xFF).toLong()
+                    val nextType = String(nextHeader, 4, 4, Charsets.US_ASCII)
+
+                    if (nextType == "moov") {
+                        return true
+                    }
+                    if (nextLen == 0L) {
+                        break
+                    }
+                    val skipBytes = nextLen - 8
+                    if (skipBytes > 0) {
+                        stream.skip(skipBytes)
+                        scanned += skipBytes
+                    }
+                }
+                false
+            } else if (boxType == "moov") {
+                true
+            } else if (header.take(4).toByteArray().contentEquals(byteArrayOf('R'.code.toByte(), 'I'.code.toByte(), 'F'.code.toByte(), 'F'.code.toByte()))) {
+                true
+            } else if (header.take(5).toByteArray().contentEquals("#!AMR".toByteArray(Charsets.US_ASCII))) {
+                true
+            } else {
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+}
+
+class RecordingReadinessAdapter(
+    private val provider: RecordingProvider,
+    private val verifyContainer: Boolean = false,
+) {
     // START_CONTRACT: scan
     // PURPOSE: Identify completed audio recordings while preserving unknown or unsafe entries for diagnostics.
     // INPUTS: none
@@ -105,6 +175,9 @@ class RecordingReadinessAdapter(private val provider: RecordingProvider) {
                 record.stability == Stability.UNKNOWN -> skipped += SkippedRecording(record.uri, SkippedRecording.Reason.UNKNOWN_STABILITY)
                 record.mimeType?.startsWith("audio/") != true -> skipped += SkippedRecording(record.uri, SkippedRecording.Reason.NOT_AUDIO)
                 record.sizeBytes == null || record.sizeBytes <= 0L -> skipped += SkippedRecording(record.uri, SkippedRecording.Reason.INVALID_SIZE)
+                verifyContainer && record.mimeType == "audio/mp4" && !AudioContainerInspector.isM4aContainerFinalized(provider.openStream(record.uri)) -> {
+                    skipped += SkippedRecording(record.uri, SkippedRecording.Reason.IN_PROGRESS)
+                }
                 else -> ready += RecordingDescriptor(
                     uri = record.uri,
                     displayName = record.displayName,
@@ -118,3 +191,4 @@ class RecordingReadinessAdapter(private val provider: RecordingProvider) {
         return ReadinessScanResult(ready, skipped)
     }
 }
+

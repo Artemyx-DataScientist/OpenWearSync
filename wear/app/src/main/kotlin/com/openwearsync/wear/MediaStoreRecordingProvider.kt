@@ -17,6 +17,8 @@ import java.io.InputStream
 
 class MediaStoreRecordingProvider(
     private val resolver: ContentResolver,
+    private val settlingWindowSeconds: Long = 5L,
+    private val currentTimeProvider: () -> Long = { System.currentTimeMillis() / 1000L },
     private val isVoiceRecorderPath: (String?) -> Boolean = { path ->
         path == null || path.contains("voice recorder", ignoreCase = true)
     },
@@ -48,6 +50,9 @@ class MediaStoreRecordingProvider(
                 val id = cursor.getLong(idColumn)
                 val size = cursor.getLong(sizeColumn).takeIf { it >= 0L }
                 val pending = cursor.getInt(pendingColumn)
+                val modified = cursor.getLong(modifiedColumn)
+                val now = currentTimeProvider()
+                val isRecent = modified > 0L && (now - modified) < settlingWindowSeconds
                 records += SourceRecord(
                     uri = collection.buildUpon().appendPath(id.toString()).build().toString(),
                     displayName = cursor.getString(nameColumn) ?: "recording-$id",
@@ -55,10 +60,11 @@ class MediaStoreRecordingProvider(
                     sizeBytes = size,
                     stability = when {
                         pending == 1 -> Stability.IN_PROGRESS
-                        size == null || size <= 0L -> Stability.UNKNOWN
+                        isRecent -> Stability.IN_PROGRESS
+                        size == null || size <= 128L -> Stability.UNKNOWN
                         else -> Stability.STABLE
                     },
-                    modifiedEpochSeconds = cursor.getLong(modifiedColumn),
+                    modifiedEpochSeconds = modified,
                 )
             }
         }

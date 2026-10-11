@@ -6,3 +6,4 @@ target/
 local.properties
 *.iml
 .idea/
+.kotlin/

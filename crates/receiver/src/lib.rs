@@ -8,10 +8,11 @@ use openwearsync_protocol::{
 };
 use openwearsync_security::{AuthToken, PairedPeerRegistry, RateLimiter, ReplayFilter};
 use openwearsync_transfer_core::{hash_sha256, TransferReconciliation};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -19,12 +20,16 @@ use std::{
     time::Duration,
 };
 
+pub mod server;
+pub use server::HttpServer;
+
 // START_MODULE_CONTRACT
-// PURPOSE: Windows receiver storage engine, crash-safe chunk journaling, and transfer service.
-// SCOPE: Staged file storage, durable chunk journaling, atomic commit, and authenticated receiver service endpoints.
-// DEPENDS: openwearsync-protocol, openwearsync-security, openwearsync-transfer-core, serde, serde_json, sha2
+// PURPOSE: Windows receiver storage engine, crash-safe chunk journaling, SQLite ledger, and transfer service.
+// SCOPE: Staged file storage, durable SQLite chunk journaling, atomic commit, and authenticated receiver service endpoints.
+// DEPENDS: openwearsync-protocol, openwearsync-security, openwearsync-transfer-core, rusqlite, serde, serde_json, sha2
 // LINKS: M-WINDOWS-RECEIVER, M-TRANSFER-REGISTRY, V-M-WINDOWS-RECEIVER, DF-RECORDING-MANIFEST, DF-ENCRYPTED-CHUNK-UPLOAD, DF-DURABLE-CHECKPOINT
 // END_MODULE_CONTRACT
+
 
 // START_MODULE_MAP
 //   DurableFileStore - crash-safe staging, fsync chunk writing, integrity verification, and atomic final commit.
@@ -41,105 +46,178 @@ pub struct LedgerEntry {
     pub final_path: Option<String>,
 }
 
-/// Durable metadata ledger persisting transfer manifests and received chunk lists.
-/// Uses atomic write-rename for crash durability.
-#[derive(Debug, Clone)]
+/// Durable metadata ledger persisting transfer manifests and received chunk lists in SQLite.
+/// Uses SQLite WAL mode with synchronous=NORMAL and foreign key integrity.
+/// Fails closed if the database cannot be opened or is corrupted.
+#[derive(Clone)]
 pub struct DurableTransferLedger {
-    ledger_path: PathBuf,
-    entries: Arc<Mutex<HashMap<String, LedgerEntry>>>,
+    db_path: PathBuf,
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl std::fmt::Debug for DurableTransferLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableTransferLedger")
+            .field("db_path", &self.db_path)
+            .finish()
+    }
 }
 
 impl DurableTransferLedger {
     // START_CONTRACT: DurableTransferLedger::open
-    // PURPOSE: Load existing ledger state from disk or create a fresh durable store.
+    // PURPOSE: Load existing SQLite ledger state from disk or create fresh schema.
     // INPUTS: { ledger_path: impl AsRef<Path> }
     // OUTPUTS: { io::Result<Self> }
-    // SIDE_EFFECTS: creates parent directories, reads JSON journal if present.
+    // SIDE_EFFECTS: creates parent directories, opens SQLite database, runs WAL pragmas and migrations.
     // END_CONTRACT: DurableTransferLedger::open
     pub fn open(ledger_path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let ledger_path = ledger_path.as_ref().to_path_buf();
-        if let Some(parent) = ledger_path.parent() {
+        let db_path = ledger_path.as_ref().to_path_buf();
+        if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        let mut entries = HashMap::new();
-        if ledger_path.exists() {
-            if let Ok(bytes) = fs::read(&ledger_path) {
-                if let Ok(loaded) = serde_json::from_slice::<HashMap<String, LedgerEntry>>(&bytes) {
-                    entries = loaded;
-                }
-            }
-        }
+        let conn = Connection::open(&db_path).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("failed to open sqlite ledger: {}", e))
+        })?;
+
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS transfers (
+                 transfer_id TEXT PRIMARY KEY,
+                 file_name TEXT NOT NULL,
+                 size_bytes INTEGER NOT NULL,
+                 sha256 BLOB NOT NULL,
+                 modified_at_ms INTEGER NOT NULL,
+                 committed INTEGER NOT NULL DEFAULT 0,
+                 final_path TEXT
+             );
+             CREATE TABLE IF NOT EXISTS chunks (
+                 transfer_id TEXT NOT NULL,
+                 offset INTEGER NOT NULL,
+                 length INTEGER NOT NULL,
+                 sha256 BLOB NOT NULL,
+                 PRIMARY KEY (transfer_id, offset),
+                 FOREIGN KEY (transfer_id) REFERENCES transfers(transfer_id) ON DELETE CASCADE
+             );"
+        ).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("failed to initialize sqlite schema: {}", e))
+        })?;
 
         Ok(Self {
-            ledger_path,
-            entries: Arc::new(Mutex::new(entries)),
+            db_path,
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
-    /// Persist current entries to disk atomically using temporary file rename.
-    fn persist_locked(&self, entries: &HashMap<String, LedgerEntry>) -> ProtocolResult<()> {
-        let temp_path = self.ledger_path.with_extension("tmp");
-        let bytes = serde_json::to_vec(entries).map_err(|e| ProtocolError {
-            code: ErrorCode::LimitExceeded,
-            message: format!("ledger serialization failed: {}", e),
-        })?;
-
-        {
-            let mut file = File::create(&temp_path).map_err(|e| ProtocolError {
-                code: ErrorCode::LimitExceeded,
-                message: format!("cannot create ledger temp file: {}", e),
-            })?;
-            file.write_all(&bytes).map_err(|e| ProtocolError {
-                code: ErrorCode::LimitExceeded,
-                message: format!("cannot write ledger: {}", e),
-            })?;
-            file.sync_all().map_err(|e| ProtocolError {
-                code: ErrorCode::LimitExceeded,
-                message: format!("cannot fsync ledger: {}", e),
-            })?;
-        }
-
-        fs::rename(&temp_path, &self.ledger_path).map_err(|e| ProtocolError {
-            code: ErrorCode::LimitExceeded,
-            message: format!("cannot atomically commit ledger: {}", e),
-        })?;
-
-        Ok(())
-    }
-
     pub fn insert_transfer(&self, manifest: Manifest) -> ProtocolResult<()> {
-        let mut map = self.entries.lock().unwrap();
-        if map.contains_key(&manifest.transfer_id) {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM transfers WHERE transfer_id = ?1",
+                params![manifest.transfer_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite query error: {}", e),
+            })?
+            .unwrap_or(false);
+
+        if exists {
             return Err(ProtocolError {
                 code: ErrorCode::Conflict,
                 message: "transfer already exists in ledger".to_string(),
             });
         }
 
-        map.insert(
-            manifest.transfer_id.clone(),
-            LedgerEntry {
-                manifest,
-                chunks: Vec::new(),
-                committed: false,
-                final_path: None,
-            },
-        );
+        conn.execute(
+            "INSERT INTO transfers (transfer_id, file_name, size_bytes, sha256, modified_at_ms, committed, final_path) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL)",
+            params![
+                manifest.transfer_id,
+                manifest.file_name,
+                manifest.size_bytes as i64,
+                &manifest.sha256[..],
+                manifest.modified_at_ms as i64,
+            ],
+        )
+        .map_err(|e| ProtocolError {
+            code: ErrorCode::LimitExceeded,
+            message: format!("sqlite insert transfer error: {}", e),
+        })?;
 
-        self.persist_locked(&map)
+        Ok(())
     }
 
     pub fn get_manifest(&self, transfer_id: &str) -> Option<Manifest> {
-        let map = self.entries.lock().unwrap();
-        map.get(transfer_id).map(|e| e.manifest.clone())
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT file_name, size_bytes, sha256, modified_at_ms FROM transfers WHERE transfer_id = ?1",
+                params![transfer_id],
+                |r| {
+                    let file_name: String = r.get(0)?;
+                    let size_bytes: i64 = r.get(1)?;
+                    let sha256_blob: Vec<u8> = r.get(2)?;
+                    let modified_at: i64 = r.get(3)?;
+                    Ok((file_name, size_bytes, sha256_blob, modified_at))
+                },
+            )
+            .optional()
+            .ok()
+            .flatten();
+
+        row.and_then(|(file_name, size_bytes, sha256_blob, modified_at)| {
+            let mut sha256 = [0u8; 32];
+            if sha256_blob.len() == 32 {
+                sha256.copy_from_slice(&sha256_blob);
+            }
+            Manifest::new(
+                transfer_id.to_string(),
+                file_name,
+                size_bytes as u64,
+                sha256,
+                modified_at as u64,
+            )
+            .ok()
+        })
     }
 
+
     pub fn get_chunks(&self, transfer_id: &str) -> Vec<ChunkDescriptor> {
-        let map = self.entries.lock().unwrap();
-        map.get(transfer_id)
-            .map(|e| e.chunks.clone())
-            .unwrap_or_default()
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT offset, length, sha256 FROM chunks WHERE transfer_id = ?1 ORDER BY offset ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = stmt.query_map(params![transfer_id], |r| {
+            let offset: i64 = r.get(0)?;
+            let length: i64 = r.get(1)?;
+            let sha256_blob: Vec<u8> = r.get(2)?;
+            Ok((offset, length, sha256_blob))
+        });
+
+        match rows {
+            Ok(iter) => {
+                let mut chunks = Vec::new();
+                for item in iter.flatten() {
+                    let mut sha256 = [0u8; 32];
+                    if item.2.len() == 32 {
+                        sha256.copy_from_slice(&item.2);
+                    }
+                    if let Ok(c) = ChunkDescriptor::new(item.0 as u64, item.1 as u32, sha256) {
+                        chunks.push(c);
+                    }
+                }
+                chunks
+            }
+            Err(_) => Vec::new(),
+        }
     }
 
     pub fn record_chunk(
@@ -147,45 +225,152 @@ impl DurableTransferLedger {
         transfer_id: &str,
         chunk: ChunkDescriptor,
     ) -> ProtocolResult<ChunkOutcome> {
-        let mut map = self.entries.lock().unwrap();
-        let entry = map.get_mut(transfer_id).ok_or_else(|| ProtocolError {
+        let conn = self.conn.lock().unwrap();
+        let status: Option<(i32,)> = conn
+            .query_row(
+                "SELECT committed FROM transfers WHERE transfer_id = ?1",
+                params![transfer_id],
+                |r| Ok((r.get(0)?,)),
+            )
+            .optional()
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite query error: {}", e),
+            })?;
+
+        let (committed,) = status.ok_or_else(|| ProtocolError {
             code: ErrorCode::TransferNotFound,
             message: "transfer not registered in ledger".to_string(),
         })?;
 
-        if entry.committed {
+        if committed != 0 {
             return Err(ProtocolError {
                 code: ErrorCode::AlreadyCommitted,
                 message: "transfer already committed".to_string(),
             });
         }
 
-        if entry.chunks.iter().any(|c| c.offset == chunk.offset) {
+        let chunk_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM chunks WHERE transfer_id = ?1 AND offset = ?2",
+                params![transfer_id, chunk.offset as i64],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite query error: {}", e),
+            })?
+            .unwrap_or(false);
+
+        if chunk_exists {
             return Ok(ChunkOutcome::AlreadyReceived);
         }
 
-        entry.chunks.push(chunk);
-        self.persist_locked(&map)?;
+        conn.execute(
+            "INSERT INTO chunks (transfer_id, offset, length, sha256) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                transfer_id,
+                chunk.offset as i64,
+                chunk.length as i64,
+                &chunk.sha256[..],
+            ],
+        )
+        .map_err(|e| ProtocolError {
+            code: ErrorCode::LimitExceeded,
+            message: format!("sqlite insert chunk error: {}", e),
+        })?;
+
         Ok(ChunkOutcome::Accepted)
     }
 
     pub fn mark_committed(&self, transfer_id: &str, final_path: &str) -> ProtocolResult<()> {
-        let mut map = self.entries.lock().unwrap();
-        let entry = map.get_mut(transfer_id).ok_or_else(|| ProtocolError {
-            code: ErrorCode::TransferNotFound,
-            message: "transfer not found in ledger".to_string(),
-        })?;
+        let conn = self.conn.lock().unwrap();
+        let rows_affected = conn
+            .execute(
+                "UPDATE transfers SET committed = 1, final_path = ?1 WHERE transfer_id = ?2",
+                params![final_path, transfer_id],
+            )
+            .map_err(|e| ProtocolError {
+                code: ErrorCode::LimitExceeded,
+                message: format!("sqlite update committed error: {}", e),
+            })?;
 
-        entry.committed = true;
-        entry.final_path = Some(final_path.to_string());
-        self.persist_locked(&map)
+        if rows_affected == 0 {
+            return Err(ProtocolError {
+                code: ErrorCode::TransferNotFound,
+                message: "transfer not found in ledger".to_string(),
+            });
+        }
+        Ok(())
     }
 
     pub fn is_committed(&self, transfer_id: &str) -> bool {
-        let map = self.entries.lock().unwrap();
-        map.get(transfer_id).map(|e| e.committed).unwrap_or(false)
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT committed FROM transfers WHERE transfer_id = ?1",
+            params![transfer_id],
+            |r| {
+                let c: i32 = r.get(0)?;
+                Ok(c == 1)
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    }
+
+    pub fn list_transfers(&self) -> Vec<LedgerEntry> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT transfer_id, file_name, size_bytes, sha256, modified_at_ms, committed, final_path FROM transfers ORDER BY modified_at_ms DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = stmt.query_map([], |r| {
+            let transfer_id: String = r.get(0)?;
+            let file_name: String = r.get(1)?;
+            let size_bytes: i64 = r.get(2)?;
+            let sha256_blob: Vec<u8> = r.get(3)?;
+            let modified_at: i64 = r.get(4)?;
+            let committed_i32: i32 = r.get(5)?;
+            let final_path: Option<String> = r.get(6)?;
+            Ok((transfer_id, file_name, size_bytes, sha256_blob, modified_at, committed_i32 != 0, final_path))
+        });
+
+        match rows {
+            Ok(iter) => {
+                let mut entries = Vec::new();
+                for item in iter.flatten() {
+                    let mut sha256 = [0u8; 32];
+                    if item.3.len() == 32 {
+                        sha256.copy_from_slice(&item.3);
+                    }
+                    if let Ok(manifest) = Manifest::new(
+                        item.0.clone(),
+                        item.1,
+                        item.2 as u64,
+                        sha256,
+                        item.4 as u64,
+                    ) {
+                        entries.push(LedgerEntry {
+                            manifest,
+                            chunks: Vec::new(),
+                            committed: item.5,
+                            final_path: item.6,
+                        });
+                    }
+                }
+                entries
+            }
+            Err(_) => Vec::new(),
+        }
     }
 }
+
 
 /// Durable file storage handling staging, fsync chunk writing, digest checking, and atomic publication.
 pub struct DurableFileStore {
@@ -443,6 +628,18 @@ impl ReceiverService {
             max_concurrent_transfers,
             active_transfers: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub fn registry(&self) -> &PairedPeerRegistry {
+        &self.registry
+    }
+
+    pub fn store(&self) -> &DurableFileStore {
+        &self.store
+    }
+
+    pub fn limiter(&self) -> &RateLimiter {
+        &self.limiter
     }
 
     /// Authenticate request from a paired peer token.
@@ -708,4 +905,114 @@ mod tests {
         );
         assert!(res_replay.is_err());
     }
+
+    #[test]
+    fn durable_ledger_fails_closed_on_corrupted_database() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("corrupt_ledger.db");
+        // Write invalid corrupted binary data
+        fs::write(&db_path, b"CORRUPTED_NOT_A_SQLITE_DATABASE_HEADER_DATA_12345678").unwrap();
+
+        // Must fail closed with error, never silently restart empty
+        let open_result = DurableTransferLedger::open(&db_path);
+        assert!(open_result.is_err(), "Opening corrupted ledger must fail closed");
+    }
+
+    #[test]
+    fn http_server_handles_network_requests_over_real_tcp() {
+        let temp = tempdir().unwrap();
+        let ledger = DurableTransferLedger::open(temp.path().join("ledger.db")).unwrap();
+        let store = Arc::new(DurableFileStore::new(
+            temp.path().join("staging"),
+            temp.path().join("dest"),
+            ledger,
+        ).unwrap());
+
+        let registry = Arc::new(PairedPeerRegistry::new());
+        let device_secret = [0x42u8; 32];
+        registry.enroll(PairedPeer {
+            device_id: "test-watch".to_string(),
+            device_name: "Watch Test".to_string(),
+            shared_secret: device_secret,
+            enrolled_at_epoch_s: 1700000000,
+            revoked: false,
+        });
+
+        let service = Arc::new(ReceiverService::new(store, registry, 4));
+        let server = HttpServer::bind("127.0.0.1:0", service).unwrap();
+        let handle = server.start_background().unwrap();
+        let addr = handle.local_addr();
+
+        // 1. Test GET /v1/status over real TCP socket
+        {
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            let req = format!("GET /v1/status HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", addr);
+            stream.write_all(req.as_bytes()).unwrap();
+            let mut resp = String::new();
+            stream.read_to_string(&mut resp).unwrap();
+            assert!(resp.starts_with("HTTP/1.1 200 OK"), "Unexpected status response: {}", resp);
+            assert!(resp.contains("\"protocol\":\"0.1.0\"") || resp.contains("max_frame_bytes"));
+        }
+
+        // 2. Test authenticated POST /v1/transfers over real TCP socket
+        {
+            let token = AuthToken::create("test-watch", &device_secret);
+            let token_json = serde_json::to_string(&token).unwrap();
+
+            let manifest = Manifest::new(
+                "transfer-tcp-1".to_string(),
+                "audio.m4a".to_string(),
+                1024,
+                [0xAAu8; 32],
+                1700000000,
+            ).unwrap();
+            let body = serde_json::to_vec(&manifest).unwrap();
+
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            let req = format!(
+                "POST /v1/transfers HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                addr, token_json, body.len()
+            );
+            stream.write_all(req.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+
+            let mut resp = String::new();
+            stream.read_to_string(&mut resp).unwrap();
+            assert!(resp.starts_with("HTTP/1.1 201 Created"), "Unexpected create response: {}", resp);
+            assert!(resp.contains("transfer-tcp-1"));
+        }
+
+        // 3. Test POST /v1/pair and GET /v1/peers over real TCP socket
+        {
+            let pair_body = serde_json::to_vec(&serde_json::json!({
+                "device_id": "watch-pin-test",
+                "device_name": "Galaxy Watch Ultra",
+                "pin": "654321"
+            })).unwrap();
+
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            let req = format!(
+                "POST /v1/pair HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                addr, pair_body.len()
+            );
+            stream.write_all(req.as_bytes()).unwrap();
+            stream.write_all(&pair_body).unwrap();
+            let mut resp = String::new();
+            stream.read_to_string(&mut resp).unwrap();
+            assert!(resp.starts_with("HTTP/1.1 200 OK"), "Unexpected pair response: {}", resp);
+            assert!(resp.contains("\"status\":\"paired\""));
+
+            // Check GET /v1/peers
+            let mut stream2 = std::net::TcpStream::connect(addr).unwrap();
+            let req2 = format!("GET /v1/peers HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", addr);
+            stream2.write_all(req2.as_bytes()).unwrap();
+            let mut resp2 = String::new();
+            stream2.read_to_string(&mut resp2).unwrap();
+            assert!(resp2.starts_with("HTTP/1.1 200 OK"));
+            assert!(resp2.contains("watch-pin-test"));
+        }
+
+        handle.stop();
+    }
 }
+

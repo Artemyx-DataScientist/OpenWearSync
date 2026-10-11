@@ -21,7 +21,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/project-structure.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/android-build.ps1

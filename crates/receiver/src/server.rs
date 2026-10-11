@@ -1,0 +1,473 @@
+//! Windows receiver network listener and HTTP protocol dispatcher.
+
+use crate::ReceiverService;
+use openwearsync_protocol::{
+    ChunkDescriptor, CommitRequest, CreateTransferRequest, ErrorCode, ProtocolError,
+    ReconcileRequest, Request, StatusRequest, UploadChunkRequest, MAX_FRAME_BYTES,
+};
+use openwearsync_security::AuthToken;
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+// START_MODULE_CONTRACT
+// PURPOSE: Windows receiver network listener and HTTP/1.1 protocol dispatcher.
+// SCOPE: TCP listening, HTTP framing, authentication extraction, REST route dispatch, and graceful shutdown.
+// DEPENDS: openwearsync-protocol, openwearsync-security, openwearsync-receiver
+// LINKS: M-WINDOWS-RECEIVER, V-M-WINDOWS-RECEIVER, DF-ENCRYPTED-CHUNK-UPLOAD, DF-RECORDING-MANIFEST
+// END_MODULE_CONTRACT
+
+// START_MODULE_MAP
+//   HttpServer - standalone TCP/HTTP network listener routing requests to ReceiverService.
+//   ServerHandle - control handle for stopping a running background server.
+// END_MODULE_MAP
+
+/// Control handle for a background receiver server.
+pub struct ServerHandle {
+    running: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    addr: SocketAddr,
+}
+
+impl ServerHandle {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn stop(mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        // Poke listener to unblock accept if needed
+        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(50));
+        if let Some(th) = self.thread.take() {
+            let _ = th.join();
+        }
+    }
+}
+
+/// Standalone HTTP receiver server bound to local LAN interface.
+pub struct HttpServer {
+    listener: TcpListener,
+    service: Arc<ReceiverService>,
+}
+
+impl HttpServer {
+    // START_CONTRACT: HttpServer::bind
+    // PURPOSE: Bind receiver TCP listener to requested host and port.
+    // INPUTS: { addr: &str, service: Arc<ReceiverService> }
+    // OUTPUTS: { std::io::Result<Self> }
+    // SIDE_EFFECTS: binds OS TCP socket.
+    // END_CONTRACT: HttpServer::bind
+    pub fn bind(addr: &str, service: Arc<ReceiverService>) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(addr)?;
+        listener.set_nonblocking(false)?;
+        Ok(Self { listener, service })
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// Spawns the server loop in a background thread and returns a shutdown handle.
+    pub fn start_background(self) -> std::io::Result<ServerHandle> {
+        let addr = self.local_addr()?;
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+
+        // Set short timeout so the loop checks running flag
+        self.listener.set_nonblocking(false)?;
+
+        let thread = thread::spawn(move || {
+            let _ = self.listener.set_nonblocking(false);
+            while running_clone.load(Ordering::SeqCst) {
+                match self.listener.accept() {
+                    Ok((stream, _)) => {
+                        if !running_clone.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let service = self.service.clone();
+                        thread::spawn(move || {
+                            let _ = handle_connection(stream, &service);
+                        });
+                    }
+                    Err(_) => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        });
+
+        Ok(ServerHandle {
+            running,
+            thread: Some(thread),
+            addr,
+        })
+    }
+
+    /// Run the server synchronously on the current thread.
+    pub fn run(&self) -> std::io::Result<()> {
+        for stream in self.listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let service = self.service.clone();
+                    thread::spawn(move || {
+                        let _ = handle_connection(stream, &service);
+                    });
+                }
+                Err(e) => {
+                    eprintln!("accept error: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Helper parsing hex bytes
+fn parse_hex_32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let byte_str = &s[i * 2..i * 2 + 2];
+        out[i] = u8::from_str_radix(byte_str, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn parse_hex_16(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let byte_str = &s[i * 2..i * 2 + 2];
+        out[i] = u8::from_str_radix(byte_str, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn extract_auth_token(headers: &HashMap<String, String>) -> Option<AuthToken> {
+    // 1. Try JSON in Authorization header: "Bearer {...}"
+    if let Some(auth_val) = headers.get("authorization") {
+        let trimmed = auth_val.trim();
+        if let Some(json_str) = trimmed.strip_prefix("Bearer ") {
+            if let Ok(token) = serde_json::from_str::<AuthToken>(json_str.trim()) {
+                return Some(token);
+            }
+        }
+    }
+
+    // 2. Try explicit headers
+    let device_id = headers.get("x-device-id")?.clone();
+    let timestamp = headers.get("x-timestamp")?.parse::<u64>().ok()?;
+    let nonce_str = headers.get("x-nonce")?;
+    let nonce = parse_hex_16(nonce_str)?;
+    let sig_str = headers.get("x-signature")?;
+    let signature = parse_hex_32(sig_str)?;
+
+    Some(AuthToken {
+        device_id,
+        timestamp_epoch_s: timestamp,
+        nonce,
+        signature,
+    })
+}
+
+fn send_response(mut stream: TcpStream, status_code: u16, status_text: &str, body: &[u8], content_type: &str) {
+    let response_headers = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status_code,
+        status_text,
+        content_type,
+        body.len()
+    );
+    let _ = stream.write_all(response_headers.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+fn send_error(stream: TcpStream, error: ProtocolError) {
+    let status_code = match error.code {
+        ErrorCode::InvalidRequest | ErrorCode::InvalidFrame | ErrorCode::InvalidManifest | ErrorCode::InvalidChunk => 400,
+        ErrorCode::TransferNotFound => 404,
+        ErrorCode::Conflict | ErrorCode::AlreadyCommitted => 409,
+        ErrorCode::LimitExceeded => 429,
+        _ => 500,
+    };
+    let json = serde_json::to_vec(&error).unwrap_or_else(|_| b"{\"message\":\"internal error\"}".to_vec());
+    send_response(stream, status_code, "Error", &json, "application/json");
+}
+
+fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+
+    // Read request line
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(());
+    }
+
+    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+    if parts.len() < 2 {
+        send_response(stream, 400, "Bad Request", b"Malformed request line", "text/plain");
+        return Ok(());
+    }
+
+    let method = parts[0];
+    let path = parts[1];
+
+    // Read headers
+    let mut headers = HashMap::new();
+    loop {
+        let mut header_line = String::new();
+        if reader.read_line(&mut header_line)? == 0 {
+            break;
+        }
+        let trimmed = header_line.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            headers.insert(k.trim().to_lowercase(), v.trim().to_string());
+        }
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    if content_length > MAX_FRAME_BYTES as usize {
+        send_response(stream, 413, "Payload Too Large", b"Frame exceeds maximum allowed size", "text/plain");
+        return Ok(());
+    }
+
+    // Read body
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+
+    // Routing
+    if method == "GET" && path == "/v1/status" {
+        let req = StatusRequest {
+            client_name: headers.get("x-client-name").cloned().unwrap_or_else(|| "openwearsync-client".to_string()),
+        };
+        match service.handle_request(Request::Status(req), None) {
+            Ok(resp) => {
+                let json = serde_json::to_vec(&resp).unwrap();
+                send_response(stream, 200, "OK", &json, "application/json");
+            }
+            Err(e) => send_error(stream, e),
+        }
+        return Ok(());
+    }
+
+    if method == "POST" && path == "/v1/pair" {
+        #[derive(serde::Deserialize)]
+        struct PairReq {
+            device_id: String,
+            device_name: String,
+            pin: String,
+        }
+        #[derive(serde::Serialize)]
+        struct PairResp {
+            status: String,
+            device_id: String,
+            shared_secret_hex: String,
+        }
+
+        let pair_req: PairReq = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                send_response(stream, 400, "Bad Request", format!("invalid pair json: {}", e).as_bytes(), "text/plain");
+                return Ok(());
+            }
+        };
+
+        if let Err(e) = service.limiter().check_allowed(&pair_req.device_id) {
+            send_error(stream, e);
+            return Ok(());
+        }
+
+        // Validate 6-digit PIN format
+        if pair_req.pin.trim().len() != 6 || !pair_req.pin.trim().chars().all(|c| c.is_ascii_digit()) {
+            let _ = service.limiter().record_failure(&pair_req.device_id);
+            send_response(stream, 400, "Bad Request", b"PIN must be a 6-digit numeric string", "text/plain");
+            return Ok(());
+        }
+
+        // Derive deterministic secret from PIN and device ID
+        let secret = openwearsync_security::hmac_sha256(pair_req.pin.trim().as_bytes(), pair_req.device_id.as_bytes());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        service.registry().enroll(openwearsync_security::PairedPeer {
+            device_id: pair_req.device_id.clone(),
+            device_name: pair_req.device_name,
+            shared_secret: secret,
+            enrolled_at_epoch_s: now,
+            revoked: false,
+        });
+        service.limiter().record_success(&pair_req.device_id);
+
+        let resp = PairResp {
+            status: "paired".to_string(),
+            device_id: pair_req.device_id,
+            shared_secret_hex: hex_encode(&secret),
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        send_response(stream, 200, "OK", &json, "application/json");
+        return Ok(());
+    }
+
+    if method == "GET" && path == "/v1/peers" {
+        let peers = service.registry().list_peers();
+        let json = serde_json::to_vec(&peers).unwrap_or_default();
+        send_response(stream, 200, "OK", &json, "application/json");
+        return Ok(());
+    }
+
+    if method == "DELETE" && path.starts_with("/v1/peers/") {
+        let device_id = &path["/v1/peers/".len()..];
+        let revoked = service.registry().revoke(device_id);
+        let resp = serde_json::json!({ "device_id": device_id, "revoked": revoked });
+        let json = serde_json::to_vec(&resp).unwrap();
+        send_response(stream, 200, "OK", &json, "application/json");
+        return Ok(());
+    }
+
+    if method == "GET" && path == "/v1/transfers" {
+        let transfers = service.store().ledger().list_transfers();
+        let json = serde_json::to_vec(&transfers).unwrap_or_default();
+        send_response(stream, 200, "OK", &json, "application/json");
+        return Ok(());
+    }
+
+    let token = extract_auth_token(&headers);
+
+    if method == "POST" && path == "/v1/transfers" {
+        let manifest = match serde_json::from_slice::<CreateTransferRequest>(&body) {
+            Ok(req) => req.manifest,
+            Err(_) => match serde_json::from_slice::<openwearsync_protocol::Manifest>(&body) {
+                Ok(m) => m,
+                Err(e) => {
+                    send_error(stream, ProtocolError {
+                        code: ErrorCode::InvalidRequest,
+                        message: format!("cannot parse transfer manifest: {}", e),
+                    });
+                    return Ok(());
+                }
+            },
+        };
+
+        match service.handle_request(Request::CreateTransfer(CreateTransferRequest { manifest }), token.as_ref()) {
+            Ok(resp) => {
+                let json = serde_json::to_vec(&resp).unwrap();
+                send_response(stream, 201, "Created", &json, "application/json");
+            }
+            Err(e) => send_error(stream, e),
+        }
+        return Ok(());
+    }
+
+    // Pattern: /v1/transfers/{id}/reconcile
+    if method == "POST" && path.starts_with("/v1/transfers/") && path.ends_with("/reconcile") {
+        let trimmed = &path["/v1/transfers/".len()..];
+        let transfer_id = trimmed.trim_end_matches("/reconcile").to_string();
+
+        match service.handle_request(Request::ReconcileTransfer(ReconcileRequest { transfer_id }), token.as_ref()) {
+            Ok(resp) => {
+                let json = serde_json::to_vec(&resp).unwrap();
+                send_response(stream, 200, "OK", &json, "application/json");
+            }
+            Err(e) => send_error(stream, e),
+        }
+        return Ok(());
+    }
+
+    // Pattern: /v1/transfers/{id}/chunks/{offset}
+    if method == "PUT" && path.starts_with("/v1/transfers/") && path.contains("/chunks/") {
+        let sub = &path["/v1/transfers/".len()..];
+        if let Some((transfer_id, offset_str)) = sub.split_once("/chunks/") {
+            let offset = match offset_str.parse::<u64>() {
+                Ok(off) => off,
+                Err(_) => {
+                    send_error(stream, ProtocolError {
+                        code: ErrorCode::InvalidChunk,
+                        message: "invalid chunk offset in path".to_string(),
+                    });
+                    return Ok(());
+                }
+            };
+
+            let sha_opt = headers.get("x-chunk-sha256").and_then(|s| parse_hex_32(s));
+            let chunk_sha = match sha_opt {
+                Some(s) => s,
+                None => openwearsync_transfer_core::hash_sha256(&body),
+            };
+
+            let chunk_desc = match ChunkDescriptor::new(offset, body.len() as u32, chunk_sha) {
+                Ok(c) => c,
+                Err(e) => {
+                    send_error(stream, e);
+                    return Ok(());
+                }
+            };
+
+            let req = UploadChunkRequest {
+                transfer_id: transfer_id.to_string(),
+                chunk: chunk_desc,
+                payload: body,
+            };
+
+            match service.handle_request(Request::UploadChunk(req), token.as_ref()) {
+                Ok(resp) => {
+                    let json = serde_json::to_vec(&resp).unwrap();
+                    send_response(stream, 200, "OK", &json, "application/json");
+                }
+                Err(e) => send_error(stream, e),
+            }
+            return Ok(());
+        }
+    }
+
+    // Pattern: /v1/transfers/{id}/commit
+    if method == "POST" && path.starts_with("/v1/transfers/") && path.ends_with("/commit") {
+        let trimmed = &path["/v1/transfers/".len()..];
+        let transfer_id = trimmed.trim_end_matches("/commit").to_string();
+
+        match service.handle_request(Request::CommitTransfer(CommitRequest { transfer_id }), token.as_ref()) {
+            Ok(resp) => {
+                let json = serde_json::to_vec(&resp).unwrap();
+                send_response(stream, 200, "OK", &json, "application/json");
+            }
+            Err(e) => send_error(stream, e),
+        }
+        return Ok(());
+    }
+
+    send_response(stream, 404, "Not Found", b"Endpoint not found", "text/plain");
+    Ok(())
+}

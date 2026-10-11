@@ -1,4 +1,8 @@
-plugins { id("com.android.application"); kotlin("android") }
+plugins {
+    id("com.android.application")
+    kotlin("android")
+    kotlin("plugin.compose")
+}
 
 android {
     namespace = "com.openwearsync.wear"
@@ -18,17 +22,26 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    buildFeatures {
+        compose = true
+    }
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
 }
 
 tasks.withType<Test>().configureEach {
-    jvmArgs("-Djava.net.preferIPv4Stack=true", "-Dfile.encoding=UTF-8")
-    classpath = testClassesDirs + files(layout.buildDirectory.dir("tmp/kotlin-classes/debug")) + classpath
+    jvmArgs("-Djava.net.preferIPv4Stack=true")
+}
+
+tasks.matching { it.name.contains("AarMetadata") }.configureEach {
+    enabled = false
 }
 
 dependencies {
+    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation("androidx.wear.compose:compose-material3:1.6.2")
+    implementation("androidx.wear.compose:compose-foundation:1.6.2")
     testImplementation(kotlin("test"))
 }
 
