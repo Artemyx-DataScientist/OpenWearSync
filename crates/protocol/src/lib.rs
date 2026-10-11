@@ -231,12 +231,53 @@ pub fn decode_hello(bytes: &[u8]) -> ProtocolResult<Hello> {
     Ok(hello)
 }
 
+pub mod sha256_format {
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(val: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        val.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ShaHelper {
+            Bytes([u8; 32]),
+            Hex(String),
+        }
+
+        match ShaHelper::deserialize(deserializer)? {
+            ShaHelper::Bytes(b) => Ok(b),
+            ShaHelper::Hex(s) => {
+                let trimmed = s.trim();
+                if trimmed.len() != 64 {
+                    return Err(D::Error::custom("sha256 hex string must be exactly 64 characters"));
+                }
+                let mut out = [0u8; 32];
+                for i in 0..32 {
+                    let b = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)
+                        .map_err(|e| D::Error::custom(format!("invalid hex in sha256: {}", e)))?;
+                    out[i] = b;
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub transfer_id: String,
     pub file_name: String,
     pub size_bytes: u64,
+    #[serde(with = "sha256_format")]
     pub sha256: [u8; 32],
     pub modified_at_ms: u64,
     #[serde(default)]
@@ -323,6 +364,7 @@ impl Manifest {
 pub struct ChunkDescriptor {
     pub offset: u64,
     pub length: u32,
+    #[serde(with = "sha256_format")]
     pub sha256: [u8; 32],
 }
 

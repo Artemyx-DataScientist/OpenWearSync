@@ -47,14 +47,37 @@ enum class WearSyncNavScreen {
 
 class MainActivity : ComponentActivity() {
     private val transferEngine = TransferEngine()
+    var onPermissionGranted: (() -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        checkAndRequestStoragePermission()
         setContent {
             OpenWearSyncWearApp(
                 transferEngine = transferEngine,
                 recordingProvider = MediaStoreRecordingProvider(contentResolver),
+                context = this,
+                registerPermissionCallback = { cb -> onPermissionGranted = cb },
             )
+        }
+    }
+
+    private fun checkAndRequestStoragePermission() {
+        val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            android.Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(permission), 101)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            onPermissionGranted?.invoke()
         }
     }
 }
@@ -63,12 +86,16 @@ class MainActivity : ComponentActivity() {
 fun OpenWearSyncWearApp(
     transferEngine: TransferEngine,
     recordingProvider: RecordingProvider,
+    context: android.content.Context? = null,
+    registerPermissionCallback: (((() -> Unit) -> Unit))? = null,
 ) {
     var currentScreen by remember { mutableStateOf(WearSyncNavScreen.BROWSER) }
     var selectedRecording by remember { mutableStateOf<RecordingDescriptor?>(null) }
     var receiverEndpoint by remember { mutableStateOf(ReceiverEndpoint("192.168.1.100", 35659)) }
     var pairingPin by remember { mutableStateOf("123456") }
     var isPaired by remember { mutableStateOf(false) }
+    var pairedSecretHex by remember { mutableStateOf<String?>(null) }
+    var pairingErrorMessage by remember { mutableStateOf<String?>(null) }
     var transferProgress by remember { mutableStateOf(TransferProgress()) }
 
     var recordings by remember { mutableStateOf<List<RecordingDescriptor>>(emptyList()) }
@@ -90,6 +117,7 @@ fun OpenWearSyncWearApp(
 
     LaunchedEffect(Unit) {
         refreshRecordings()
+        registerPermissionCallback?.invoke { refreshRecordings() }
     }
 
     CircularScreenContainer {
@@ -109,6 +137,8 @@ fun OpenWearSyncWearApp(
                             transferEngine.transferRecording(
                                 endpoint = receiverEndpoint,
                                 descriptor = rec,
+                                deviceId = "galaxy-watch-wearos",
+                                sharedSecretHex = pairedSecretHex,
                                 onProgress = { progress -> transferProgress = progress },
                             )
                         }
@@ -121,6 +151,7 @@ fun OpenWearSyncWearApp(
                     endpoint = receiverEndpoint,
                     pin = pairingPin,
                     isPaired = isPaired,
+                    errorMessage = pairingErrorMessage,
                     onPinChange = { pairingPin = it },
                     onEndpointChange = { receiverEndpoint = it },
                     onPair = {
@@ -132,6 +163,12 @@ fun OpenWearSyncWearApp(
                                 pin = pairingPin,
                             )
                             isPaired = res.success
+                            if (res.success) {
+                                pairedSecretHex = res.sharedSecretHex
+                                pairingErrorMessage = null
+                            } else {
+                                pairingErrorMessage = res.error ?: "Pairing failed"
+                            }
                         }
                     },
                     onBack = { currentScreen = WearSyncNavScreen.BROWSER },
@@ -286,6 +323,7 @@ fun PairingScreen(
     endpoint: ReceiverEndpoint,
     pin: String,
     isPaired: Boolean,
+    errorMessage: String? = null,
     onPinChange: (String) -> Unit,
     onEndpointChange: (ReceiverEndpoint) -> Unit,
     onPair: () -> Unit,
@@ -297,20 +335,31 @@ fun PairingScreen(
         verticalArrangement = Arrangement.Center,
     ) {
         Text("Pair PC Receiver", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
         Text("${endpoint.host}:${endpoint.port}", fontSize = 10.sp, color = Color(0xFF94A3B8))
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
-        Text("Enter 6-Digit PIN:", fontSize = 10.sp, color = Color.White)
+        Text("6-Digit Receiver PIN:", fontSize = 10.sp, color = Color.White)
         Text(
             text = pin,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             color = Color(0xFFFBBF24),
-            modifier = Modifier.padding(vertical = 4.dp),
+            modifier = Modifier.padding(vertical = 2.dp),
         )
 
-        Spacer(modifier = Modifier.height(6.dp))
+        if (errorMessage != null) {
+            Text(
+                text = errorMessage,
+                fontSize = 9.sp,
+                color = Color(0xFFEF4444),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 8.dp),
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
         Row {
             Button(
                 onClick = onPair,

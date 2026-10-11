@@ -282,6 +282,37 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
         return Ok(());
     }
 
+    if method == "POST" && path == "/v1/pair/session" {
+        #[derive(serde::Deserialize)]
+        struct CreateSessionReq {
+            pin: Option<String>,
+            ttl_secs: Option<u64>,
+        }
+        #[derive(serde::Serialize)]
+        struct SessionResp {
+            session_id: String,
+            pin: String,
+            expires_at_epoch_s: u64,
+        }
+
+        let req_opt: Option<CreateSessionReq> = serde_json::from_slice(&body).ok();
+        let ttl = req_opt.as_ref().and_then(|r| r.ttl_secs).unwrap_or(300);
+        let session = if let Some(pin) = req_opt.as_ref().and_then(|r| r.pin.as_ref()) {
+            service.set_pairing_pin(pin, ttl)
+        } else {
+            service.start_pairing_session(None, ttl)
+        };
+
+        let resp = SessionResp {
+            session_id: session.session_id,
+            pin: session.pin,
+            expires_at_epoch_s: session.expires_at_epoch_s,
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        send_response(stream, 201, "Created", &json, "application/json");
+        return Ok(());
+    }
+
     if method == "POST" && path == "/v1/pair" {
         #[derive(serde::Deserialize)]
         struct PairReq {
@@ -309,12 +340,37 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
             return Ok(());
         }
 
+        // Verify against active pairing session
+        let active_session = match service.get_active_pairing_session() {
+            Some(s) => s,
+            None => {
+                send_response(
+                    stream,
+                    403,
+                    "Forbidden",
+                    b"{\"error\":\"no active pairing session; initiate pairing on Windows first\"}",
+                    "application/json",
+                );
+                return Ok(());
+            }
+        };
+
         // Validate 6-digit PIN format
         if pair_req.pin.trim().len() != 6 || !pair_req.pin.trim().chars().all(|c| c.is_ascii_digit()) {
             let _ = service.limiter().record_failure(&pair_req.device_id);
             send_response(stream, 400, "Bad Request", b"PIN must be a 6-digit numeric string", "text/plain");
             return Ok(());
         }
+
+        // Verify candidate PIN matches active session PIN
+        if pair_req.pin.trim() != active_session.pin.trim() {
+            let _ = service.limiter().record_failure(&pair_req.device_id);
+            send_response(stream, 401, "Unauthorized", b"{\"error\":\"invalid pairing PIN\"}", "application/json");
+            return Ok(());
+        }
+
+        // Consume session so PIN cannot be reused
+        let _ = service.consume_pairing_session();
 
         // Derive deterministic secret from PIN and device ID
         let secret = openwearsync_security::hmac_sha256(pair_req.pin.trim().as_bytes(), pair_req.device_id.as_bytes());
@@ -343,7 +399,25 @@ fn handle_connection(stream: TcpStream, service: &ReceiverService) -> std::io::R
     }
 
     if method == "GET" && path == "/v1/peers" {
-        let peers = service.registry().list_peers();
+        #[derive(serde::Serialize)]
+        struct SafePeerDto {
+            device_id: String,
+            device_name: String,
+            enrolled_at_epoch_s: u64,
+            revoked: bool,
+        }
+
+        let peers: Vec<SafePeerDto> = service
+            .registry()
+            .list_peers()
+            .into_iter()
+            .map(|p| SafePeerDto {
+                device_id: p.device_id,
+                device_name: p.device_name,
+                enrolled_at_epoch_s: p.enrolled_at_epoch_s,
+                revoked: p.revoked,
+            })
+            .collect();
         let json = serde_json::to_vec(&peers).unwrap_or_default();
         send_response(stream, 200, "OK", &json, "application/json");
         return Ok(());

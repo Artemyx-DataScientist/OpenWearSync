@@ -42,6 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = env::var("OPENWEARSYNC_PORT").unwrap_or_else(|_| "35659".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
 
+    let session = service.start_pairing_session(None, 3600);
+    println!("Initial pairing session active for 60 min. PIN: {}", session.pin);
+
     let server = HttpServer::bind(&bind_addr, service)?;
     println!("Listening for incoming Galaxy Watch transfers on http://{}", bind_addr);
     println!("Press Ctrl+C to terminate.");

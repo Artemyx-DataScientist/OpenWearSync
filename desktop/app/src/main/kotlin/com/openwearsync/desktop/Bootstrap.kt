@@ -57,6 +57,48 @@ data class DesktopTransferRecord(
     val finalPath: String? = null,
 )
 
+object ReceiverDaemonManager {
+    private var process: Process? = null
+
+    fun isProcessRunning(): Boolean {
+        return process?.isAlive == true
+    }
+
+    fun startDaemon(): Boolean {
+        if (isProcessRunning()) return true
+        val possiblePaths = listOf(
+            File("D:/SignalWeaveCore-cargo-target/debug/receiver_daemon.exe"),
+            File("D:/SignalWeaveCore-cargo-target/release/receiver_daemon.exe"),
+            File("crates/receiver/target/debug/receiver_daemon.exe"),
+            File("crates/receiver/target/release/receiver_daemon.exe"),
+            File("receiver_daemon.exe")
+        )
+        val exe = possiblePaths.firstOrNull { it.exists() }
+        val pb = if (exe != null) {
+            ProcessBuilder(exe.absolutePath)
+        } else {
+            ProcessBuilder("cargo", "run", "-p", "openwearsync-receiver", "--bin", "receiver_daemon", "--locked")
+        }
+        return try {
+            pb.redirectErrorStream(true)
+            process = pb.start()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun stopDaemon() {
+        process?.let {
+            it.destroy()
+            if (it.isAlive) {
+                it.destroyForcibly()
+            }
+        }
+        process = null
+    }
+}
+
 class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659") {
     fun isServerRunning(): Boolean {
         return try {
@@ -69,6 +111,30 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
             conn.responseCode == 200
         } catch (_: Exception) {
             false
+        }
+    }
+
+    fun createPairingSession(pin: String? = null, ttlSecs: Long = 300L): String? {
+        return try {
+            val url = URL("$baseUrl/v1/pair/session")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 2000
+                readTimeout = 2000
+                setRequestProperty("Content-Type", "application/json")
+            }
+            val body = if (pin != null) """{"pin":"$pin","ttl_secs":$ttlSecs}""" else """{"ttl_secs":$ttlSecs}"""
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode == 200 || conn.responseCode == 201) {
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                val match = """"pin"\s*:\s*"([^"]+)"""".toRegex().find(text)
+                match?.groupValues?.get(1) ?: pin
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -117,7 +183,7 @@ class ReceiverHttpClient(private val baseUrl: String = "http://127.0.0.1:35659")
 
     private fun parsePeersJson(json: String): List<DesktopPeerRecord> {
         val list = mutableListOf<DesktopPeerRecord>()
-        val regex = """\{"device_id":"([^"]+)","device_name":"([^"]+)","shared_secret":\[[^\]]*\],"enrolled_at_epoch_s":(\d+),"revoked":(true|false)\}""".toRegex()
+        val regex = """\{"device_id":"([^"]+)","device_name":"([^"]+)",(?:.*?)?"enrolled_at_epoch_s":(\d+),"revoked":(true|false)\}""".toRegex()
         regex.findAll(json).forEach { match ->
             val (devId, devName, enrolledStr, revokedStr) = match.destructured
             list.add(DesktopPeerRecord(devId, devName, enrolledStr.toLongOrNull() ?: 0L, revokedStr.toBoolean()))
@@ -218,7 +284,35 @@ fun DesktopMainScreen() {
                     }
                 }
 
-                Row {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isRunning) {
+                        Button(
+                            onClick = {
+                                thread {
+                                    ReceiverDaemonManager.stopDaemon()
+                                    Thread.sleep(500)
+                                    refreshState()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                        ) {
+                            Text("Stop Receiver", fontSize = 12.sp)
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                thread {
+                                    ReceiverDaemonManager.startDaemon()
+                                    Thread.sleep(1200)
+                                    refreshState()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
+                        ) {
+                            Text("Start Receiver", fontSize = 12.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = { refreshState() },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
@@ -279,7 +373,11 @@ fun DesktopMainScreen() {
                     Text("Paired Devices (${peers.filter { !it.revoked }.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF38BDF8))
                     Button(
                         onClick = {
-                            generatedPin = "%06d".format((100000..999999).random())
+                            val pin = "%06d".format((100000..999999).random())
+                            generatedPin = pin
+                            thread {
+                                client.createPairingSession(pin, 300)
+                            }
                             showPairDialog = true
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),

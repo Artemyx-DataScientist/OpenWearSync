@@ -6,7 +6,9 @@ use openwearsync_protocol::{
     ReconciledResponse, Request, Response, StatusRequest, StatusResponse, UploadChunkRequest,
     MAX_FILE_BYTES,
 };
-use openwearsync_security::{AuthToken, PairedPeerRegistry, RateLimiter, ReplayFilter};
+use openwearsync_security::{
+    AuthToken, PairedPeerRegistry, PairingSession, RateLimiter, ReplayFilter,
+};
 use openwearsync_transfer_core::{hash_sha256, TransferReconciliation};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -606,6 +608,7 @@ pub struct ReceiverService {
     replay_filter: ReplayFilter,
     max_concurrent_transfers: usize,
     active_transfers: Arc<Mutex<HashSet<String>>>,
+    active_pairing_session: Arc<Mutex<Option<PairingSession>>>,
 }
 
 impl ReceiverService {
@@ -627,6 +630,7 @@ impl ReceiverService {
             replay_filter: ReplayFilter::new(),
             max_concurrent_transfers,
             active_transfers: Arc::new(Mutex::new(HashSet::new())),
+            active_pairing_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -640,6 +644,44 @@ impl ReceiverService {
 
     pub fn limiter(&self) -> &RateLimiter {
         &self.limiter
+    }
+
+    pub fn start_pairing_session(&self, client_id_hint: Option<String>, ttl_secs: u64) -> PairingSession {
+        let session = PairingSession::new(
+            client_id_hint.unwrap_or_else(|| "galaxy-watch".to_string()),
+            ttl_secs,
+        );
+        let mut lock = self.active_pairing_session.lock().unwrap();
+        *lock = Some(session.clone());
+        session
+    }
+
+    pub fn set_pairing_pin(&self, pin: &str, ttl_secs: u64) -> PairingSession {
+        let mut session = PairingSession::new("galaxy-watch".to_string(), ttl_secs);
+        session.pin = pin.to_string();
+        let mut lock = self.active_pairing_session.lock().unwrap();
+        *lock = Some(session.clone());
+        session
+    }
+
+    pub fn get_active_pairing_session(&self) -> Option<PairingSession> {
+        let mut lock = self.active_pairing_session.lock().unwrap();
+        if let Some(session) = lock.as_ref() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now > session.expires_at_epoch_s {
+                *lock = None;
+                return None;
+            }
+        }
+        lock.clone()
+    }
+
+    pub fn consume_pairing_session(&self) -> Option<PairingSession> {
+        let mut lock = self.active_pairing_session.lock().unwrap();
+        lock.take()
     }
 
     /// Authenticate request from a paired peer token.
@@ -939,7 +981,7 @@ mod tests {
         });
 
         let service = Arc::new(ReceiverService::new(store, registry, 4));
-        let server = HttpServer::bind("127.0.0.1:0", service).unwrap();
+        let server = HttpServer::bind("127.0.0.1:0", service.clone()).unwrap();
         let handle = server.start_background().unwrap();
         let addr = handle.local_addr();
 
@@ -984,6 +1026,7 @@ mod tests {
 
         // 3. Test POST /v1/pair and GET /v1/peers over real TCP socket
         {
+            service.set_pairing_pin("654321", 300);
             let pair_body = serde_json::to_vec(&serde_json::json!({
                 "device_id": "watch-pin-test",
                 "device_name": "Galaxy Watch Ultra",
