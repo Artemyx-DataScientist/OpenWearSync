@@ -25,8 +25,22 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358"
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          link-to-sdk: true
+      - name: Configure Android NDK environment
+        shell: pwsh
+        run: |
+          $ndkPath = '${{ steps.setup-ndk.outputs.ndk-path }}'
+          if (-not $ndkPath -or -not (Test-Path $ndkPath)) {
+            $preinstalled = Get-ChildItem "$env:ANDROID_HOME\ndk" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+            if ($preinstalled) { $ndkPath = $preinstalled.FullName }
+          }
+          Write-Host "Configured NDK at $ndkPath"
+          "ANDROID_NDK_HOME=$ndkPath" >> $env:GITHUB_ENV
+          "ANDROID_NDK_ROOT=$ndkPath" >> $env:GITHUB_ENV
       - run: cargo install cargo-ndk --version 4.1.2 --locked
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/project-structure.ps1
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gates/desktop-build.ps1
